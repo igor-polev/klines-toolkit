@@ -1,2 +1,10 @@
 __pycache__/
 
+ktlog_zero_trades.txt
+ktlog_tick_changes.txt
+ktlog_url_errors.txt
+ktlog_telegram_errors.txt
+ktlog_unknown_errors.txt
+
+kt_bot_monitor.lock
+kt_bot_alerts.lock
