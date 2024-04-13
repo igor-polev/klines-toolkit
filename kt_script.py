@@ -52,14 +52,15 @@ from kt_params import _CLEAR_PATTERNS
 from kt_params import _TRADINGVIEW_URL
 from kt_params import _BINANCE_FUTURES_URL
 from kt_params import _PARAM_SET
-from kt_params import _OFF_LINE
+from kt_params import _USE_BOTS
+from kt_params import _PROCESS_DATA
 
 class KTscript:
-    
+
     def __init__(self, cmdl_params):
 
         print("\n--- Binance data processing script ---\n")
-        
+
         self.exe_parts    = 1
         self.thread_num   = 0
         self.symbol_list  = _SYMBOL_FILTER
@@ -89,15 +90,16 @@ class KTscript:
         else:
             subset = None
         self.db          = BinanceDB(self.symbol_list, subset, self.param_set)
-        self.bot_monitor = telegram_bot(_BOT_TOKEN_MONITOR)
-        self.bot_alerts  = telegram_bot(_BOT_TOKEN_ALERTS)
-        
+
+        if _USE_BOTS:
+            self.bot_monitor = telegram_bot(_BOT_TOKEN_MONITOR)
+            self.bot_alerts  = telegram_bot(_BOT_TOKEN_ALERTS)
+            self.BOT_MONITOR_LOCK = 'kt_bot_monitor'
+            self.BOT_ALERTS_LOCK  = 'kt_bot_alerts'
+
         self.data_chunk  = _DATA_CHUNK
         self.new_data    = None
         self.symbol      = None
-        
-        self.BOT_MONITOR_LOCK = 'kt_bot_monitor'
-        self.BOT_ALERTS_LOCK  = 'kt_bot_alerts'
 
     def init_after_db(self):
         self.ka    = KAnalizer(self.db.params)
@@ -115,8 +117,10 @@ class KTscript:
             self.db.params['TOLERANCE_FRAME_SIZE'],
             self.db.params['VOLUME_FRAME_SIZE']
         )
-        
+
     async def telegram_message(self, msg_type, msg, rep_id=None, caption=None, retry=3, wait_sec=5):
+
+        if not _USE_BOTS: return
 
         if msg_type in ['alert', 'price']:
             await file_lock(self.BOT_ALERTS_LOCK, raise_on_failure=False)
@@ -159,7 +163,9 @@ class KTscript:
             return -1
 
     async def check_bot(self):
-        
+
+        if not _USE_BOTS: return
+
         print("Checking Telegram bot...                     ", end=' ', flush=True)
         replies = []
         texts   = []
@@ -209,22 +215,24 @@ class KTscript:
                     resend = open_g.loc[open_g.symbol_name.isin(texts), 'posted_id'].to_list()
                 if resend:
                     for idx in resend: await self.telegram_message('fwd', idx)
-                
+
         print("{} replies processed.".format(len(replies)))
 
     async def monitor_prices(self, symbol_id):
-        
+
+        if not _USE_BOTS: return
+
         open_g  = await self.db.get_open_groups(symbol_id)
         open_g  = open_g.loc[open_g.monitor != 0]
         if open_g.empty: return
-        
+
         print("Monitoring selected cases...                 ", end=' ', flush=True)
         open_g['symbol_id']  = symbol_id
         open_g['msg']        = _NaN
         open_g['crossed']    = False
         open_g['new_time']   = open_g.monitor
         open_g['last_price'] = 0.0
-        
+
         end_time = self.db.symbols.at[symbol_id, 'max_data_time']
         k_data   = await self.db.load_data(
             symbol_id,
@@ -237,7 +245,7 @@ class KTscript:
         low_price  = k_data.low.iat[-1]
         up_speed   = (high_price - k_data.high.iat[0]) / self.DISTANCE
         down_speed = (k_data.low.iat[0] - low_price) / self.DISTANCE
-        
+
         change_m_time = False
         for g in open_g.itertuples():
             if g.Index[1]:
@@ -273,7 +281,7 @@ class KTscript:
                 open_g.loc[open_g.monitor != open_g.new_time, ['symbol_id', 'new_time']],
                 'next_monitor_time'
             )
-        
+
         open_g.dropna(subset='msg', inplace=True)
         if open_g.empty:
             print("nothing to report")
@@ -304,22 +312,27 @@ class KTscript:
                 )
             if int == type(msg): sent_cnt -= 1
         print("{}/{} notifications sent / failed".format(sent_cnt, open_g.shape[0] - sent_cnt))
-    
+
     async def report_archived_groups(self):
+
+        if not _USE_BOTS: return
 
         check_time = await self.poke_interval('archived_check_time', _ARCH_CHECK_INTERVAL)
         if not check_time: return
         last_archived = await self.db.get_open_groups(archived = check_time[0])
         if last_archived.empty: return
-        
+
         print("Reporting arcived groups...                  ", end=' ', flush=True)
         sent_cnt = last_archived.shape[0]
         for g in last_archived.itertuples():
             msg = await self.telegram_message('text', "The case is archived.", rep_id=g.posted_id)
             if int == type(msg): sent_cnt -= 1
         print("{}/{} notifications sent / failed".format(sent_cnt, last_archived.shape[0] - sent_cnt))
-    
+
     async def send_open_groups(self, symbol_id):
+
+        if not _USE_BOTS: return
+
         print("Checking new active groups...                ", end=' ', flush=True)
         open_g = await self.db.get_open_groups(symbol_id)
         open_g = open_g.loc[open_g.posted_id == 0]
@@ -357,26 +370,45 @@ class KTscript:
     async def check_zero_trades(self):
         zero_trades = self.new_data.loc[self.new_data.volume == 0.0].index
         if not zero_trades.empty:
-            nei_zero_cnt   = 0
+            print('--- Some zero trades detected...')
+            nei_zero_cnt   = 1
             prev_zero_time = zero_trades[0]
             for zero_time in zero_trades[1:]:
                 if zero_time - prev_zero_time == self.TIME_STEP:
                     nei_zero_cnt += 1
                 else:
-                    nei_zero_cnt = 0
-                if nei_zero_cnt >= _NEIGHBOUR_ZERO_TRADES:
-                    date_time = pd.to_datetime(zero_time, unit='ms').strftime(self.db.TIME_FORMAT)
-                    print("--- Zero trades detected at {}!\n--- Skipping the coin!\n".format(date_time))
+                    nei_zero_cnt = 1
+                if nei_zero_cnt == _NEIGHBOUR_ZERO_TRADES:
+                    last_non_zero = zero_time - _NEIGHBOUR_ZERO_TRADES * self.TIME_STEP
+                    date_time = pd.to_datetime(
+                        last_non_zero + self.TIME_STEP,
+                        unit='ms'
+                    ).strftime(self.db.TIME_FORMAT)
+                    print("--- Critical count of zero trades detected at {}!".format(date_time))
                     await log_write(_LOG_ZERO_TRADES, "{id}\t{sym}\t{dt}\t{zt} zero trades detected".format(
                         id  = self.symbol.Index,
                         sym = self.symbol.symbol_name,
                         dt  = date_time,
                         zt  = _NEIGHBOUR_ZERO_TRADES
                     ))
-                    return -1
+                    if _USE_BOTS:
+                        await self.telegram_message(
+                            'alert',
+                            "{}: zero trades detected at {}!".format(self.symbol.symbol_name, date_time),
+                            retry=10
+                        )
+                    return last_non_zero
                 prev_zero_time = zero_time
+            if zero_trades[-1] == self.new_data.index[-1]:
+                last_non_zero == self.new_data.shape[0] - 2
+                while last_non_zero >= 0:
+                    if self.new_data.volume.iat[last_non_zero] == 0.0:
+                        last_non_zero -= 1
+                    else:
+                        break
+                return self.new_data.index[0] + last_non_zero * self.TIME_STEP
         print('   Zero trades check finished - no issues.')
-        return 0
+        return self.new_data.index[-1]
 
     async def check_tick_zise(self, start_time, end_time, last_end_time, max_k_time):
         oc_data = self.new_data[['open', 'close']]
@@ -387,7 +419,7 @@ class KTscript:
             self.new_data.loc[self.new_data.l_tale > 0.0, 'l_tale'].min()
         )
         self.new_data.drop(columns=['h_tale', 'l_tale'], inplace=True)
-        
+
         real_tick = floor(log10(min_tale))
         f_search  = True
         while f_search:
@@ -397,11 +429,11 @@ class KTscript:
             else:
                 min_tale  -= first_digit * 10 ** real_tick
                 real_tick -= 1
-                if real_tick <= -20: raise Exception("Tick size evaluation failure.")
+                if real_tick <= -20:
+                    raise Exception("Tick size evaluation failure.")
         real_tick = 10 ** (real_tick + 1)
-        
+
         if real_tick != self.ka.tick_size:
-            if not _OFF_LINE: raise Exception("tick_canged")
             if self.f_check_tick:
                 print("--- Detected tick size {} differes from DB tick size {}!".format(real_tick, self.ka.tick_size))
                 await log_write(_LOG_TICK_CHANGES, "{id}\t{sym}\t{db_tk}\t{dt_tk} DB / detected tick.".format(
@@ -410,6 +442,14 @@ class KTscript:
                     dt_tk = real_tick,
                     db_tk = self.ka.tick_size
                 ))
+                if _USE_BOTS:
+                    await self.telegram_message(
+                        'alert',
+                        "{}: tick change detected!".format(self.symbol.symbol_name),
+                        retry=10
+                    )
+            if _GET_NEW_DATA: return -1
+            if self.f_check_tick:
                 self.data_chunk = 86400000 # one day
                 if last_end_time == -1:
                     new_end_time = min(self.symbol.max_e_time + self.data_chunk, max_k_time)
@@ -456,25 +496,25 @@ class KTscript:
                 await self.db.set_variable(name, the_time)
                 return (last_time, the_time)
             return ()
-        
+
     async def iterate(self):
-        
-        if not _RECLASSIFY and not _OFF_LINE:
+
+        if not _RECLASSIFY and (_USE_BOTS or _GET_NEW_DATA):
             the_time = datetime.now().timestamp()
             may_sleep = min(
                 _SYM_REQ_INTERVAL   + self.db.symbols.last_req.min(),
                 _BOT_CHECK_INTERVAL + await self.db.get_variable('bot_check_time')
             ) - the_time
             if may_sleep > 0.0: await self.go_to_sleep(may_sleep)
-        
+
         sym_num   = 0
         sym_total = self.db.symbols.shape[0]
         for sym in self.db.symbols.itertuples():
 
-            if not _RECLASSIFY and not _OFF_LINE:
+            if _USE_BOTS and not _RECLASSIFY:
                 if await self.poke_interval('bot_check_time', _BOT_CHECK_INTERVAL):
                     await self.check_bot()
-            
+
                 the_time  = datetime.now().timestamp()
                 sym_sleep = _SYM_REQ_INTERVAL   - the_time + self.db.symbols.last_req.min()
                 bot_sleep = _BOT_CHECK_INTERVAL - the_time + await self.db.get_variable('bot_check_time')
@@ -490,53 +530,67 @@ class KTscript:
                     start_datetime.strftime("%d.%m.%y %H:%M:%S")))
             print("\n--------------------------\nProcessing {} ({}/{})\n--------------------------\n".format(
                 sym.symbol_name, sym_num, sym_total))
-            
+
             self.symbol       = sym
             self.ka.tick_size = sym.tick_size
             self.ka.clear_k_data()
-            
-            if _GET_NEW_DATA and not _RECLASSIFY and not _OFF_LINE:
+
+            if _GET_NEW_DATA and not _RECLASSIFY:
                 the_time = datetime.now().timestamp()
-                if the_time - self.db.symbols.at[sym.Index, 'last_req'] >= _SYM_REQ_INTERVAL:
+                if the_time - sym.last_req >= _SYM_REQ_INTERVAL:
                     self.db.symbols.at[sym.Index, 'last_req'] = the_time
                     if await self.db.get_binance_data(sym.Index):
                         await self.monitor_prices(sym.Index)
 
-            max_k_time = self.db.symbols.at[sym.Index, 'max_data_time']
-            if _CHECK_NEW_DATA and (max_k_time - sym.max_e_time) // self.TIME_STEP < _MIN_NEW_KLINES and not _RECLASSIFY:
+            if not _PROCESS_DATA: continue
+
+            min_k_time  = self.db.symbols.at[sym.Index, 'min_data_time']
+            max_k_time  = self.db.symbols.at[sym.Index, 'max_data_time']
+            max_e_time  = self.db.symbols.at[sym.Index, 'max_e_time']
+            open_g_time = self.db.symbols.at[sym.Index, 'open_g_time']
+            if _CHECK_NEW_DATA and (max_k_time - max_e_time) // self.TIME_STEP < _MIN_NEW_KLINES and not _RECLASSIFY:
                 print("\n--- Insufficient new klines data - calculations unnecessary\n")
                 continue
-            
+
             if _RECLASSIFY:
-                start_time = sym.min_data_time
+                start_time = min_k_time
                 end_time   = max_k_time
             else:
-                start_time = max(min(sym.max_e_time - self.MAX_D_FRAME, sym.open_g_time), sym.min_data_time)
-                end_time   = min(sym.max_e_time + self.data_chunk, max_k_time)
+                start_time = max(min(max_e_time - self.MAX_D_FRAME, open_g_time), min_k_time)
+                end_time   = min(max_e_time + self.data_chunk, max_k_time)
             self.new_data, self.ka.known_e, self.ka.known_g, self.ka.known_ge = \
                 await self.db.load_data(sym.Index, start_time, end_time)
-            
+            if self.new_data.empty:
+                print("\n--- No klines data loaded - abnormal case?\n")
+                msg = "{}: no klines data loaded - abnormal case?".format(sym.symbol_name)
+                await log_write(_LOG_UNKNOWN_ERRORS, msg)
+                if _USE_BOTS:
+                    await self.telegram_message('alert', msg, retry=10)
+                continue
+
             last_end_time = -1
             while end_time != last_end_time:
-        
+
                 if (_CHECK_ZERO_TRADES or _CHECK_TICK_SIZE) and not _RECLASSIFY:
                     print("Checking klines data integrity...")
                 if _CHECK_ZERO_TRADES and not _RECLASSIFY:
-                    if await self.check_zero_trades() != 0: break
-                if _CHECK_TICK_SIZE and not _RECLASSIFY:
-                    try:
-                        end_time = await self.check_tick_zise(start_time, end_time, last_end_time, max_k_time)
-                    except Exception as error:
-                        if str(error) == 'tick_canged' and not _OFF_LINE:
-                            await self.telegram_message(
-                                'alert',
-                                "{}: tick change detected!".format(sym.symbol_name),
-                                retry=10
-                            )
-                            break
+                    last_non_zero = await self.check_zero_trades()
+                    if last_non_zero != self.new_data.index[-1]:
+                        await self.db.truncate_klines(sym.Index, last_non_zero)
+                        max_k_time = self.db.symbols.at[sym.Index, 'max_data_time']
+                        if last_non_zero >= self.new_data.index[0]:
+                            self.new_data = self.new_data.truncate(after = last_non_zero)
+                            end_time = last_non_zero
                         else:
-                            raise error
-    
+                            print("--- All new data is zero, skipping the coin.\n")
+                            break
+
+                if _CHECK_TICK_SIZE and not _RECLASSIFY:
+                    end_time = await self.check_tick_zise(start_time, end_time, last_end_time, max_k_time)
+                    if end_time == -1:
+                        print("--- Skipping the coin!\n")
+                        break
+
                 print("Processing data...")
                 self.ka.add_k_data(self.new_data)
                 print("   Klines / extremums / groups in memory...   {}/{}/{}".format(
@@ -546,17 +600,17 @@ class KTscript:
                 self.ka.set_changed(False)
                 self.ka.trim_data(self.ka.k_data.index[-1] - self.MAX_D_FRAME)
                 self.ka.reset_known()
-                
+
                 start_time = self.ka.k_data.index[-1] + self.TIME_STEP
                 last_end_time = end_time
                 end_time = min(end_time + self.data_chunk, max_k_time)
                 if end_time != last_end_time:
                     self.new_data = await self.db.load_data(sym.Index, start_time, end_time, klines_only=True)
 
-                if not _RECLASSIFY and not _OFF_LINE:
+                if not _RECLASSIFY and _USE_BOTS:
                     await self.report_archived_groups()
-            
-            if _SEND_OPEN_GROUPS and not _RECLASSIFY and not _OFF_LINE:
+
+            if _SEND_OPEN_GROUPS and not _RECLASSIFY and _USE_BOTS:
                 await self.send_open_groups(sym.Index)
 
         end_datetime = datetime.now()
@@ -576,13 +630,13 @@ class KTscript:
                 if _RECLASSIFY:
                     await self.db.reset_open_groups_rank()
                     break
-                if _OFF_LINE:
+                if not _GET_NEW_DATA:
                     break
         except Exception as ex:
-            if not _RECLASSIFY and not _OFF_LINE:
-                msg = "Thread {} raised {} : {}".format(self.thread_num, type(ex), ex)
-                print("\n\n!!! Unhandled exception:\n\n{}".format(msg))
-                await log_write(_LOG_UNKNOWN_ERRORS, msg)
+            msg = "Thread {} raised {} : {}".format(self.thread_num, type(ex), ex)
+            print("\n\n!!! Unhandled exception:\n\n{}".format(msg))
+            await log_write(_LOG_UNKNOWN_ERRORS, msg)
+            if _USE_BOTS:
                 if int != type(await self.telegram_message('alert', msg, retry=100)):
                     print("\n!!! Telegram notification send.\n\n")
                 else:

@@ -44,13 +44,13 @@ class BinanceDB:
         self.__DB_RETRY  = 20
         self.__URL_RETRY = 3
         self.TIME_FORMAT = "%d.%m.%y %H:%M"
-        
-        self.output       = output     
+
+        self.output       = output
         self.symbol_list  = symbol_list
         self.interval     = interval
         self.param_set    = param_set
         self.subset       = subset
-    
+
     def __init_reqs_dict(self, sym_filter_and, sym_filter_where):
         self.__reqs = {
             'klines_read' : """
@@ -349,7 +349,7 @@ class BinanceDB:
                         interval     = {interval} AND
                         status_id   != {status_1} AND
                         status_id   != {status_2} AND
-                        symbol_id    = ? 
+                        symbol_id    = ?
                 ) AS totals
                 WHERE
                     param_set_id = {p_id}     AND
@@ -525,7 +525,7 @@ class BinanceDB:
                         groups.minimum      = open_groups.minimum      AND
                         groups.e_count      = open_groups.e_count
                 )
-                {sym_cond} 
+                {sym_cond}
             """.format(sym_cond = sym_filter_where),
             'read_symbol_limits' : """
                 SELECT
@@ -546,26 +546,36 @@ class BinanceDB:
             ),
             'symbol_limits_need_init' : """
                 SELECT symbols.symbol_id
-                FROM
-                    symbols LEFT JOIN symbol_limits
-                    ON symbols.symbol_id = symbol_limits.symbol_id
+                FROM symbols LEFT JOIN symbol_limits ON
+                    symbols.symbol_id = symbol_limits.symbol_id
+                    AND interval     = {interval}
+                    AND param_set_id = {p_id}
                 WHERE
-                    interval     = {interval} AND
-                    param_set_id = {p_id}     AND
                     symbol_limits.symbol_id IS NULL
             """.format(
                 interval = self.interval,
                 p_id     = self.param_set_id
+            ),
+            'truncate_klines' : """
+                DELETE FROM klines
+                WHERE
+                    interval  = {interval} AND
+                    symbol_id = {sym_id}   AND
+                    open_time > {last_time}
+            """.format(
+                interval  = self.interval,
+                sym_id    = '{sym_id}',
+                last_time = '{last_time}'
             )
         }
 
     async def setup(self):
-    
+
         if self.output: print("Requesting database setup ...", end=' ', flush=True)
         async with self:
 
             self.symbol_names = dict(self.__cursor.execute(
-                "SELECT symbol_name, symbol_id FROM symbols"
+                "SELECT symbol_name, symbol_id FROM symbols WHERE status = 'ACTIVE'"
             ).fetchall())
             self.statuses = dict(self.__cursor.execute(
                 "SELECT status_code, status_id FROM statuses"
@@ -573,14 +583,14 @@ class BinanceDB:
             self.classes = dict(self.__cursor.execute(
                 "SELECT class_code, class_id FROM classes"
             ).fetchall())
-    
+
             self.param_set_id = int(self.__cursor.execute(
                 "SELECT id FROM param_sets WHERE set_name = ?", (self.param_set,)
             ).fetchone()[0])
             self.params = dict(self.__cursor.execute(
                 "SELECT param_name, value FROM param_set_values WHERE set_name = ?", (self.param_set,)
             ).fetchall())
-    
+
             self.params['EXTR_FRAME_SIZE']      = int(self.params['EXTR_FRAME_SIZE'])
             self.params['VOLUME_FRAME_SIZE']    = int(self.params['VOLUME_FRAME_SIZE'])
             self.params['TOLERANCE_FRAME_SIZE'] = int(self.params['TOLERANCE_FRAME_SIZE'])
@@ -590,7 +600,7 @@ class BinanceDB:
             self.params['RANGE_E_WEIGHT']       = int(self.params['RANGE_E_WEIGHT'])
             self.params['TOO_OLD_LIMIT']        = int(self.params['TOO_OLD_LIMIT'])
             self.params['TIME_STEP']            = self.interval * 60000
-    
+
             if self.subset:
                 if not self.symbol_list:
                     self.symbol_list = list(self.symbol_names.keys())
@@ -610,7 +620,7 @@ class BinanceDB:
             else:
                 sym_filter_and   = ""
                 sym_filter_where = ""
-            
+
             self.__init_reqs_dict(sym_filter_and, sym_filter_where)
 
             f_get_data     = True
@@ -630,7 +640,7 @@ class BinanceDB:
                 else:
                     f_get_data = False
             self.symbols = pd.read_sql(
-                "SELECT * FROM symbols " + sym_filter_where,
+                "SELECT * FROM symbols WHERE status = 'ACTIVE' " + sym_filter_and,
                 self.__db, index_col='symbol_id'
             ).join(sym_limits)
 
@@ -655,7 +665,7 @@ class BinanceDB:
         if self.output:
             if f_reset_limits: print("done.")
             else: print("DB setup recieved.")
-            
+
     async def __aenter__(self):
         if not self.__f_open:
             await file_lock(self.__db_name, self.__DB_RETRY)
@@ -671,8 +681,20 @@ class BinanceDB:
             self.__f_open = False
             file_unlock(self.__db_name)
 
+    async def truncate_klines(self, symbol_id, last_time):
+
+        print("--- Truncating zero trades... ", end=' ', flush=True)
+        async with self:
+            self.__cursor.execute(self.__reqs['truncate_klines'].format(
+                sym_id    = symbol_id,
+                last_time = last_time
+            ))
+            self.__update_limit(symbol_id, 'max_data_time', last_time)
+            self.__db.commit()
+        print("done.")
+
     async def clear_patterns(self):
-        
+
         print("\n!!! ATTENTION !!!\nDeleting ALL patterns for {}...".format(self.symbol_list))
         conf = input("Are you sure? Type 'YES' to confirm: ")
         if conf != 'YES': return
@@ -688,7 +710,7 @@ class BinanceDB:
         print("Patterns deleted.\n")
 
     async def reset_symbol_limits(self):
-        
+
         if self.output: print("Calculating all symbol limits...")
         if self.__f_open:
             need_close = False
@@ -696,12 +718,13 @@ class BinanceDB:
             need_close = True
             await self.__aenter__()
         need_init = self.__cursor.execute(self.__reqs['symbol_limits_need_init']).fetchall()
-        print(need_init)
-        input()
         if need_init:
             cnt = self.__cursor.executemany(self.__reqs['init_limit'], need_init).rowcount
+            self.__db.commit()
             if self.output: print("   {} absent symbols registered.".format(cnt))
-        need_reset = list(map(lambda i: (i, i, i), self.symbol_names.values()))
+        need_reset = self.__cursor.execute(
+                "SELECT symbol_id, symbol_id, symbol_id FROM symbols"
+        ).fetchall()
         for req in ['reset_limits_k', 'reset_limits_e', 'reset_limits_g']:
             cnt = self.__cursor.executemany(self.__reqs[req], need_reset).rowcount
             if self.output: print("   {} limits calculated ({}).".format(cnt, req))
@@ -723,7 +746,7 @@ class BinanceDB:
             result = pd.read_sql(req, self.__db).astype({'minimum':'bool'})
         result.set_index(idx_columns, inplace=True)
         return result
-    
+
     async def mark_open_groups(self, open_g, mark):
         async with self:
             self.__cursor.executemany(
@@ -760,7 +783,7 @@ class BinanceDB:
         ).fetchone()[0]
         if need_close: await self.__aexit__()
         return result
-    
+
     async def set_variable(self, var_name, value, get_last=False):
         if self.__f_open:
             need_close = False
@@ -776,9 +799,9 @@ class BinanceDB:
         self.__db.commit()
         if need_close: await self.__aexit__()
         if get_last:   return last_value
-    
+
     async def load_data(self, symbol_id, start_time, end_time, klines_only=False, output=None):
-        
+
         if output == None:
             output = self.output
         if output:
@@ -786,7 +809,7 @@ class BinanceDB:
                 pd.to_datetime(start_time, unit='ms').strftime(self.TIME_FORMAT),
                 pd.to_datetime(end_time,   unit='ms').strftime(self.TIME_FORMAT)
             ))
-        
+
         async with self:
             k_data = pd.read_sql(self.__reqs['klines_read'].format(
                 sym_id     = symbol_id,
@@ -802,7 +825,7 @@ class BinanceDB:
             })
             k_data.set_index('open_time', inplace=True)
             k_data.sort_index(inplace=True)
-            
+
             if klines_only:
                 if output:
                     print("   Klines loaded...                           {}".format(k_data.shape[0]))
@@ -835,7 +858,7 @@ class BinanceDB:
             e_data.set_index(['open_time','minimum'], inplace=True)
             e_data.sort_index(inplace=True)
             e_data['changed'] = False
-    
+
             g_data = pd.read_sql(self.__reqs['groups_read'].format(
                 sym_id     = symbol_id,
                 start_time = start_time,
@@ -1038,7 +1061,7 @@ class BinanceDB:
             print("   Groups saved / updated...                  {}/{}".format(new_g.shape[0], changed_g))
 
     async def delete_symbols(self, sym_names):
-        
+
         if self.output: print("Deleting symbols {}:".format(sym_names))
         delete_request = "DELETE FROM {} WHERE symbol_id IN " + str(
             tuple(map(lambda name: self.symbol_names[name], sym_names))
@@ -1060,12 +1083,12 @@ class BinanceDB:
         if self.output: print("Symbols deleted.")
 
     async def get_binance_data(self, symbol_id):
-        
+
         HTTP_ERROR_MSG = "\n--- HTTP error {} - see {}.\n--- Processing terminated."
         HTTP_ERROR_LOG = "{}: HTTP code {} - {}"
         URL_ERROR_MSG  = "\n--- URL error:\n--- {}\n--- See {}."
         URL_ERROR_LOG  = "{}: {}"
-        
+
         print("Recieving Binance data...                    ", end=' ', flush=True)
         msg = ''
         retry_left = self.__URL_RETRY
@@ -1164,14 +1187,19 @@ class BinanceDB:
             raise Exception("Binance returned non-continuous data!")
         async with self:
             new_data.to_sql('klines', self.__db, if_exists='append')
+            if self.symbols.at[symbol_id, 'min_data_time'] == 0:
+                start_time = new_data.index[0]
+                self.__update_limit(symbol_id, 'min_data_time', start_time)
+                self.__update_limit(symbol_id, 'open_g_time',   start_time)
+                self.__update_limit(symbol_id, 'max_e_time',    start_time  - self.params['TIME_STEP'])
             self.__update_limit(symbol_id, 'max_data_time', new_data.index[-1])
             self.__db.commit()
 
         print("{} klines recieved.".format(new_data.shape[0]))
         return True
-    
+
     def __update_limit(self, symbol_id, field, new_value):
-        if field == 'max_data_time':
+        if field in ['max_data_time', 'min_data_time']:
             req = self.__reqs['update_limit_all_ps']
         else:
             req = self.__reqs['update_limit']
@@ -1183,7 +1211,7 @@ class BinanceDB:
         if new_value == 'NULL':
             new_value = _NaN
         self.symbols.at[symbol_id, field] = new_value
-    
+
     async def save_tick_size(self, symbol_id, tick_size):
         async with self:
             self.__cursor.execute(

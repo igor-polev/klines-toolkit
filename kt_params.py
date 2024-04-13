@@ -9,15 +9,16 @@ Created on Mon Oct 16 09:31:11 2023
 """
 
 _INTERVAL   = 5
-_PARAM_SET  = 'NEXT_SET'
+_PARAM_SET  = 'MAIN_SET'
 _DATA_CHUNK = 120 * 24 * 3600 * 1000 # in ms
 
+_USE_BOTS              = False
 _SEND_OPEN_GROUPS      = False
 _GET_NEW_DATA          = True
+_PROCESS_DATA          = False
 _CHECK_NEW_DATA        = True
 _CHECK_TICK_SIZE       = True
 _CHECK_ZERO_TRADES     = True
-_OFF_LINE              = False
 _RECLASSIFY            = False
 _MIN_NEW_KLINES        = 40 // _INTERVAL
 _NEIGHBOUR_ZERO_TRADES = 4 * 60 // _INTERVAL
@@ -83,6 +84,7 @@ _IGNORE_SETTING_WITH_COPY_WARNING = True
 _BINANCE_URL     = "https://fapi.binance.com"
 _KLINES_URL      = "/fapi/v1/klines"
 _SERVER_TIME_URL = "/fapi/v1/time"
+_INFO_URL        = "/fapi/v1/exchangeInfo"
 _DB_FILE         = "/home/igor/Crypto/Binance/binance_data.db"
 
 _BINANCE_FUTURES_URL = "https://www.binance.com/en/futures/"
