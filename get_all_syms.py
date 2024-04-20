@@ -28,8 +28,9 @@ async def main():
                 return d['tickSize']
         raise Exception("Tick size not found for {}".format(row.symbol))
     
+    print("Requesting Binance...", end=' ', flush=True)
     with urllib.request.urlopen(_BINANCE_URL + _INFO_URL) as response:
-        print(response.status)
+        print("response recieved with code ", response.status)
         data = json.loads(response.read())['symbols']
     
     df = pd.DataFrame(data=data)
@@ -46,10 +47,13 @@ async def main():
         'onboardDate' : 'int64',
         'tickSize' : 'float64'
     })
+    df.set_index('symbol', inplace=True)
 
+    print("Adding table 'einfo' to database...", end=' ', flush=True)
     db = sql.connect(_DB_FILE)
     df.to_sql('einfo', db)
     db.close()
+    print("done.")
 
     return
 

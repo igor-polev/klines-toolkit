@@ -1085,9 +1085,9 @@ class BinanceDB:
     async def get_binance_data(self, symbol_id):
 
         HTTP_ERROR_MSG = "\n--- HTTP error {} - see {}.\n--- Processing terminated."
-        HTTP_ERROR_LOG = "{}: HTTP code {} - {}"
+        HTTP_ERROR_LOG = "[{}] {}: HTTP code {} - {}"
         URL_ERROR_MSG  = "\n--- URL error:\n--- {}\n--- See {}."
-        URL_ERROR_LOG  = "{}: {}"
+        URL_ERROR_LOG  = "[{}] {}: {}"
 
         print("Recieving Binance data...                    ", end=' ', flush=True)
         msg = ''
@@ -1098,7 +1098,7 @@ class BinanceDB:
                     s_time = int(json.loads(response.read())['serverTime'])
                     if response.status != 200:
                         await log_write(_LOG_URL_ERRORS, HTTP_ERROR_LOG.format(
-                            "TIME_REQUEST", response.status, response.headers
+                            "TIME_REQUEST", "", response.status, response.headers
                         ))
                         msg = HTTP_ERROR_MSG.format(response.status, _LOG_URL_ERRORS)
                         print(msg)
@@ -1106,11 +1106,11 @@ class BinanceDB:
                 break
             except (url_err.URLError, TimeoutError) as error:
                 msg = "{} : {}".format(type(error), error)
-                await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format("TIME_REQUEST", msg))
+                await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format("TIME_REQUEST", "", msg))
                 retry_left -= 1
                 if retry_left: await asyncio.sleep(10)
         if not retry_left:
-            await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format("TIME_REQUEST", msg))
+            await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format("TIME_REQUEST", "", msg))
             print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
             return False
 
@@ -1135,7 +1135,10 @@ class BinanceDB:
                         new_data = pd.read_json(response, orient='values')
                     else:
                         await log_write(_LOG_URL_ERRORS, HTTP_ERROR_LOG.format(
-                            "KLINES_REQUEST", response.status, response.headers
+                            "KLINES_REQUEST",
+                            self.symbols.at[symbol_id, 'symbol_name'],
+                            response.status,
+                            response.headers
                         ))
                         msg = HTTP_ERROR_MSG.format(response.status, _LOG_URL_ERRORS)
                         print(msg)
@@ -1143,16 +1146,22 @@ class BinanceDB:
                 break
             except (url_err.URLError, TimeoutError) as error:
                 msg = "{} : {}".format(type(error), error)
-                await log_write(_LOG_URL_ERRORS,URL_ERROR_LOG.format("KLINES_REQUEST", msg))
+                await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format(
+                    "KLINES_REQUEST", self.symbols.at[symbol_id, 'symbol_name'], msg
+                ))
                 print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
                 retry_left -= 1
                 if retry_left: await asyncio.sleep(10)
         if not retry_left:
-            await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format("KLINES_REQUEST", msg))
+            await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format(
+                "KLINES_REQUEST", self.symbols.at[symbol_id, 'symbol_name'], msg
+            ))
             print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
             return False
         if new_data.shape[1] != 12:
-            msg = "KLINES_REQUEST: abnormal result shape: {}".format(new_data.shape)
+            msg = "[KLINES_REQUEST] {}: abnormal result shape: {}".format(
+                self.symbols.at[symbol_id, 'symbol_name'], new_data.shape
+            )
             await log_write(_LOG_URL_ERRORS, msg)
             print("\n--- URL error:\n--- {}\n--- See {}.".format(msg, _LOG_URL_ERRORS))
             return False
@@ -1176,9 +1185,6 @@ class BinanceDB:
             'volume'    : 'float64',
             'count'     : 'int64'
         })
-        date_time = pd.to_datetime(new_data.open_time, unit='ms')
-        new_data['year']      = date_time.dt.year
-        new_data['month']     = date_time.dt.month
         new_data['symbol_id'] = symbol_id
         new_data['interval']  = self.interval
         new_data.set_index('open_time', inplace=True)

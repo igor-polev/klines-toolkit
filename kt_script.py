@@ -369,45 +369,46 @@ class KTscript:
 
     async def check_zero_trades(self):
         zero_trades = self.new_data.loc[self.new_data.volume == 0.0].index
-        if not zero_trades.empty:
-            print('--- Some zero trades detected...')
-            nei_zero_cnt   = 1
-            prev_zero_time = zero_trades[0]
-            for zero_time in zero_trades[1:]:
-                if zero_time - prev_zero_time == self.TIME_STEP:
-                    nei_zero_cnt += 1
+        if zero_trades.empty:
+            print('   Zero trades check finished - no issues.')
+            return self.new_data.index[-1]
+        print('--- Some zero trades detected...')
+        nei_zero_cnt   = 1
+        prev_zero_time = zero_trades[0]
+        for zero_time in zero_trades[1:]:
+            if zero_time - prev_zero_time == self.TIME_STEP:
+                nei_zero_cnt += 1
+            else:
+                nei_zero_cnt = 1
+            if nei_zero_cnt == _NEIGHBOUR_ZERO_TRADES:
+                last_non_zero = zero_time - _NEIGHBOUR_ZERO_TRADES * self.TIME_STEP
+                date_time = pd.to_datetime(
+                    last_non_zero + self.TIME_STEP,
+                    unit='ms'
+                ).strftime(self.db.TIME_FORMAT)
+                print("--- Critical count of zero trades detected at {}!".format(date_time))
+                await log_write(_LOG_ZERO_TRADES, "{id}\t{sym}\t{dt}\t{zt} zero trades detected".format(
+                    id  = self.symbol.Index,
+                    sym = self.symbol.symbol_name,
+                    dt  = date_time,
+                    zt  = _NEIGHBOUR_ZERO_TRADES
+                ))
+                if _USE_BOTS:
+                    await self.telegram_message(
+                        'alert',
+                        "{}: zero trades detected at {}!".format(self.symbol.symbol_name, date_time),
+                        retry=10
+                    )
+                return last_non_zero
+            prev_zero_time = zero_time
+        if zero_trades[-1] == self.new_data.index[-1]:
+            last_non_zero = self.new_data.shape[0] - 2
+            while last_non_zero >= 0:
+                if self.new_data.volume.iat[last_non_zero] == 0.0:
+                    last_non_zero -= 1
                 else:
-                    nei_zero_cnt = 1
-                if nei_zero_cnt == _NEIGHBOUR_ZERO_TRADES:
-                    last_non_zero = zero_time - _NEIGHBOUR_ZERO_TRADES * self.TIME_STEP
-                    date_time = pd.to_datetime(
-                        last_non_zero + self.TIME_STEP,
-                        unit='ms'
-                    ).strftime(self.db.TIME_FORMAT)
-                    print("--- Critical count of zero trades detected at {}!".format(date_time))
-                    await log_write(_LOG_ZERO_TRADES, "{id}\t{sym}\t{dt}\t{zt} zero trades detected".format(
-                        id  = self.symbol.Index,
-                        sym = self.symbol.symbol_name,
-                        dt  = date_time,
-                        zt  = _NEIGHBOUR_ZERO_TRADES
-                    ))
-                    if _USE_BOTS:
-                        await self.telegram_message(
-                            'alert',
-                            "{}: zero trades detected at {}!".format(self.symbol.symbol_name, date_time),
-                            retry=10
-                        )
-                    return last_non_zero
-                prev_zero_time = zero_time
-            if zero_trades[-1] == self.new_data.index[-1]:
-                last_non_zero == self.new_data.shape[0] - 2
-                while last_non_zero >= 0:
-                    if self.new_data.volume.iat[last_non_zero] == 0.0:
-                        last_non_zero -= 1
-                    else:
-                        break
-                return self.new_data.index[0] + last_non_zero * self.TIME_STEP
-        print('   Zero trades check finished - no issues.')
+                    break
+            return self.new_data.index[0] + last_non_zero * self.TIME_STEP
         return self.new_data.index[-1]
 
     async def check_tick_zise(self, start_time, end_time, last_end_time, max_k_time):
@@ -501,27 +502,23 @@ class KTscript:
 
         if not _RECLASSIFY and (_USE_BOTS or _GET_NEW_DATA):
             the_time = datetime.now().timestamp()
-            may_sleep = min(
-                _SYM_REQ_INTERVAL   + self.db.symbols.last_req.min(),
-                _BOT_CHECK_INTERVAL + await self.db.get_variable('bot_check_time')
-            ) - the_time
-            if may_sleep > 0.0: await self.go_to_sleep(may_sleep)
+            may_sleep_get = _SYM_REQ_INTERVAL   - the_time + self.db.symbols.last_req.min()
+            may_sleep_bot = _BOT_CHECK_INTERVAL - the_time + await self.db.get_variable('bot_check_time')
+            if _USE_BOTS and _GET_NEW_DATA:
+                may_sleep = min(may_sleep_bot, may_sleep_get)
+            elif _USE_BOTS:
+                may_sleep = may_sleep_bot
+            else:
+                may_sleep = may_sleep_get
+            if may_sleep > 0.0:
+                await self.go_to_sleep(may_sleep)
 
         sym_num   = 0
         sym_total = self.db.symbols.shape[0]
         for sym in self.db.symbols.itertuples():
 
-            if _USE_BOTS and not _RECLASSIFY:
-                if await self.poke_interval('bot_check_time', _BOT_CHECK_INTERVAL):
-                    await self.check_bot()
-
-                the_time  = datetime.now().timestamp()
-                sym_sleep = _SYM_REQ_INTERVAL   - the_time + self.db.symbols.last_req.min()
-                bot_sleep = _BOT_CHECK_INTERVAL - the_time + await self.db.get_variable('bot_check_time')
-                if bot_sleep > 0.0 and bot_sleep < sym_sleep:
-                    return
-                if sym_sleep > 0.0:
-                    await self.go_to_sleep(sym_sleep)
+            if not _RECLASSIFY and _USE_BOTS and await self.poke_interval('bot_check_time', _BOT_CHECK_INTERVAL):
+                await self.check_bot()
 
             sym_num += 1
             if sym_num == 1:
@@ -535,13 +532,15 @@ class KTscript:
             self.ka.tick_size = sym.tick_size
             self.ka.clear_k_data()
 
-            if _GET_NEW_DATA and not _RECLASSIFY:
-                the_time = datetime.now().timestamp()
-                if the_time - sym.last_req >= _SYM_REQ_INTERVAL:
-                    self.db.symbols.at[sym.Index, 'last_req'] = the_time
-                    if await self.db.get_binance_data(sym.Index):
-                        await self.monitor_prices(sym.Index)
-
+            if not _RECLASSIFY and _GET_NEW_DATA:
+                the_time  = datetime.now().timestamp()
+                may_sleep = _SYM_REQ_INTERVAL - the_time + sym.last_req
+                if may_sleep > 0.0:
+                    await self.go_to_sleep(may_sleep)
+                    the_time = datetime.now().timestamp()
+                self.db.symbols.at[sym.Index, 'last_req'] = the_time
+                if await self.db.get_binance_data(sym.Index):
+                    await self.monitor_prices(sym.Index)
             if not _PROCESS_DATA: continue
 
             min_k_time  = self.db.symbols.at[sym.Index, 'min_data_time']
@@ -609,7 +608,7 @@ class KTscript:
 
                 if not _RECLASSIFY and _USE_BOTS:
                     await self.report_archived_groups()
-
+                
             if _SEND_OPEN_GROUPS and not _RECLASSIFY and _USE_BOTS:
                 await self.send_open_groups(sym.Index)
 

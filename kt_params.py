@@ -9,20 +9,20 @@ Created on Mon Oct 16 09:31:11 2023
 """
 
 _INTERVAL   = 5
-_PARAM_SET  = 'MAIN_SET'
+_PARAM_SET  = 'MAIN_SET5'
 _DATA_CHUNK = 120 * 24 * 3600 * 1000 # in ms
 
-_USE_BOTS              = False
-_SEND_OPEN_GROUPS      = False
+_USE_BOTS              = True
+_SEND_OPEN_GROUPS      = True
 _GET_NEW_DATA          = True
-_PROCESS_DATA          = False
+_PROCESS_DATA          = True
 _CHECK_NEW_DATA        = True
 _CHECK_TICK_SIZE       = True
 _CHECK_ZERO_TRADES     = True
 _RECLASSIFY            = False
 _MIN_NEW_KLINES        = 40 // _INTERVAL
 _NEIGHBOUR_ZERO_TRADES = 4 * 60 // _INTERVAL
-_SYM_REQ_INTERVAL      = _INTERVAL * 60.0 # in seconds
+_SYM_REQ_INTERVAL      = 0 * _INTERVAL * 60.0 # in seconds
 _BOT_CHECK_INTERVAL    = 10.0             # in seconds
 _ARCH_CHECK_INTERVAL   = 10.0             # in seconds
 _MONITOR_TIMES         = [30, 15, -1]  # in minutes, last value must be -1
@@ -93,10 +93,10 @@ _BOT_TOKEN_MONITOR   = '6910755004:AAGfi1OIKZ7IAXSDHB5IR9SKxoqsfPDJ0no'
 _BOT_TOKEN_ALERTS    = '6789740433:AAHWsgIRkpw-SoBFx6nxtCePGUo7s4dZT-s'
 _BOT_CHAT_ID         = 6349677666
 
-_LOG_ZERO_TRADES       = "ktlog_zero_trades.txt"
-_LOG_TICK_CHANGES      = "ktlog_tick_changes.txt"
-_LOG_URL_ERRORS        = "ktlog_url_errors.txt"
-_LOG_TELEGRAM_ERRORS   = "ktlog_telegram_errors.txt"
-_LOG_UNKNOWN_ERRORS    = "ktlog_unknown_errors.txt"
+_LOG_ZERO_TRADES      = "ktlog_zero_trades.txt"
+_LOG_TICK_CHANGES    = "ktlog_tick_changes.txt"
+_LOG_URL_ERRORS      = "ktlog_url_errors.txt"
+_LOG_TELEGRAM_ERRORS = "ktlog_telegram_errors.txt"
+_LOG_UNKNOWN_ERRORS  = "ktlog_unknown_errors.txt"
 
 _SYMBOL_FILTER = []

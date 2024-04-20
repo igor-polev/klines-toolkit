@@ -8,9 +8,9 @@ Created on Mon Nov 15 15:09:00 2023
 @author: IGOR POLEV
 """
 
-_SYM   = 'XRPUSDT'
-_START = '2024-01-14'
-_DAYS  = 3
+_SYM   = 'BTCSTUSDT'
+_START = '2021-03-12'
+_DAYS  = 5
 
 
 from sys import maxsize as _MAXINT
@@ -53,14 +53,14 @@ async def show_plot(sym_name, day_start, day_cnt):
         
     await graph.display_data([
         'VOLUMES',
-        'GROUP_RANGES',
+        # 'GROUP_RANGES',
         # 'EXTREMUM_RANGES',
         # 'GROUP_RANKS',
         # 'LAST_EXTREMUM',
         # 'LAST_NON_EXTREMUM',
         # 'EX_HEIGHT',
         # 'GROUP_EXTREMUMS',
-        'EXTREMUMS',
+        # 'EXTREMUMS',
         # 'DERIVATIVE',
         # 'GROUP_TOLERANCES',
         # 'GROUP_RESULTS',
