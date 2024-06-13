@@ -28,28 +28,27 @@ from kt_params import _SERVER_TIME_URL
 from kt_params import _BINANCE_URL
 from kt_params import _KLINES_URL
 from kt_params import _LOG_URL_ERRORS
-from kt_params import _SELECT_GROUPS_REQ
-from kt_params import _SELECT_ALL_GROUPS_REQ
+from kt_params import _MIN_MONITOR_RANK
 from kt_params import _MONITOR_TIMES
 from kt_params import _RECLASSIFY
 
 class BinanceDB:
 
-    def __init__(self, symbol_list=[], subset=None, param_set=_PARAM_SET, db_name=_DB_FILE, interval=_INTERVAL, output=True):
+    def __init__(self, symbol_list=[], subset=None, param_set=_PARAM_SET, db_name=_DB_FILE, interval=_INTERVAL):
 
         self.__db_name   = db_name
         self.__db        = None
         self.__cursor    = None
         self.__f_open    = False
-        self.__DB_RETRY  = 20
+        self.__DB_RETRY  = 40
         self.__URL_RETRY = 3
         self.TIME_FORMAT = "%d.%m.%y %H:%M"
 
-        self.output       = output
         self.symbol_list  = symbol_list
         self.interval     = interval
         self.param_set    = param_set
         self.subset       = subset
+        self.verbosity    = 1
 
     def __init_reqs_dict(self, sym_filter_and, sym_filter_where):
         self.__reqs = {
@@ -482,19 +481,73 @@ class BinanceDB:
                 WHERE
                     param_set_id = {p_id}     AND
                     interval     = {interval} AND
-                    symbol_id    = :symbol_id
+                    symbol_id    = :symbol_id AND
+                    minimum      = :minimum   AND
+                    archived     = 0.0        AND
+                    posted_id   != 0
             """.format(
                 interval  = self.interval,
                 p_id      = self.param_set_id
             ),
-            'open_groups' : _SELECT_GROUPS_REQ.format(
+            'open_groups' : """
+                SELECT
+                    open_time,
+                    minimum,
+                    e_count,
+                    price,
+                    posted_id,
+                    monitor
+                FROM
+                    open_groups
+                WHERE
+                    interval     = {interval} AND
+                    param_set_id = {p_id}     AND
+                    symbol_id    = {sym_id}   AND
+                    archived     = 0.0        AND
+                    (
+                        class_id IN {class_ids} AND
+                        rank     >= {min_rank}
+                        OR monitor != 0
+                    )
+            """.format(
+                min_rank  = _MIN_MONITOR_RANK,
+                class_ids = "('{}', '{}')".format(
+                    self.classes['PIERCE_READY'],
+                    self.classes['FIRST_TOUCH']
+                ),
                 interval  = self.interval,
                 p_id      = self.param_set_id,
                 sym_id    = '{sym_id}'
             ),
-            'all_open_groups' : _SELECT_ALL_GROUPS_REQ.format(
-                interval  = self.interval,
-                p_id      = self.param_set_id
+            'all_open_groups' : """
+                SELECT
+                    symbol_id,
+                    open_time,
+                    minimum,
+                    e_count,
+                    price,
+                    posted_id,
+                    monitor
+                FROM
+                    open_groups
+                WHERE
+                    interval     = {interval} AND
+                    param_set_id = {p_id}     AND
+                    archived     = 0.0        AND
+                    (
+                        class_id IN {class_ids} AND
+                        rank     >= {min_rank}
+                        OR monitor != 0
+                    )
+            """.format(
+                min_rank = _MIN_MONITOR_RANK,
+                class_ids = "('{}', '{}')".format(
+                    self.classes['PIERCE_READY'],
+                    self.classes['FIRST_TOUCH']
+                ),
+                interval = self.interval,
+                p_id     = self.param_set_id
+                
             ),
             'archived_groups' : """
                 SELECT
@@ -571,7 +624,8 @@ class BinanceDB:
 
     async def setup(self):
 
-        if self.output: print("Requesting database setup ...", end=' ', flush=True)
+        if self.verbosity >= 3:
+            print("Requesting database setup ...", end=' ', flush=True)
         async with self:
 
             self.symbol_names = dict(self.__cursor.execute(
@@ -632,7 +686,7 @@ class BinanceDB:
                 )
                 if sym_limits.empty:
                     if f_reset_limits:
-                        if self.output: print('\n')
+                        if self.verbosity >= 3: print('\n')
                         await self.reset_symbol_limits()
                         f_reset_limits = False
                     else:
@@ -662,7 +716,7 @@ class BinanceDB:
         self.symbols = self.symbols.astype({'open_g_time':'int64', 'max_e_time':'int64'})
         self.symbols['last_req'] = 0.0
 
-        if self.output:
+        if self.verbosity >= 3:
             if f_reset_limits: print("done.")
             else: print("DB setup recieved.")
 
@@ -683,7 +737,8 @@ class BinanceDB:
 
     async def truncate_klines(self, symbol_id, last_time):
 
-        print("--- Truncating zero trades... ", end=' ', flush=True)
+        if self.verbosity >= 2:
+            print("--- Truncating zero trades... ", end=' ', flush=True)
         async with self:
             self.__cursor.execute(self.__reqs['truncate_klines'].format(
                 sym_id    = symbol_id,
@@ -691,7 +746,8 @@ class BinanceDB:
             ))
             self.__update_limit(symbol_id, 'max_data_time', last_time)
             self.__db.commit()
-        print("done.")
+        if self.verbosity >= 3:
+            print("done.")
 
     async def clear_patterns(self):
 
@@ -711,7 +767,8 @@ class BinanceDB:
 
     async def reset_symbol_limits(self):
 
-        if self.output: print("Calculating all symbol limits...")
+        if self.verbosity >= 3:
+            print("Calculating all symbol limits...")
         if self.__f_open:
             need_close = False
         else:
@@ -721,16 +778,19 @@ class BinanceDB:
         if need_init:
             cnt = self.__cursor.executemany(self.__reqs['init_limit'], need_init).rowcount
             self.__db.commit()
-            if self.output: print("   {} absent symbols registered.".format(cnt))
+            if self.verbosity >= 3:
+                print("   {} absent symbols registered.".format(cnt))
         need_reset = self.__cursor.execute(
                 "SELECT symbol_id, symbol_id, symbol_id FROM symbols"
         ).fetchall()
         for req in ['reset_limits_k', 'reset_limits_e', 'reset_limits_g']:
             cnt = self.__cursor.executemany(self.__reqs[req], need_reset).rowcount
-            if self.output: print("   {} limits calculated ({}).".format(cnt, req))
+            if self.verbosity >= 3:
+                print("   {} limits calculated ({}).".format(cnt, req))
         self.__db.commit()
         if need_close: await self.__aexit__()
-        if self.output: print("Limits calculations finished.")
+        if self.verbosity >= 3:
+            print("Limits calculations finished.")
 
     async def get_open_groups(self, symbol_id=None, archived=None):
         idx_columns = ['open_time', 'minimum', 'e_count']
@@ -800,11 +860,9 @@ class BinanceDB:
         if need_close: await self.__aexit__()
         if get_last:   return last_value
 
-    async def load_data(self, symbol_id, start_time, end_time, klines_only=False, output=None):
+    async def load_data(self, symbol_id, start_time, end_time, klines_only=False):
 
-        if output == None:
-            output = self.output
-        if output:
+        if self.verbosity >= 3:
             print("Loading DB data...\n   Period to load (UTC)...                    from {} to {}".format(
                 pd.to_datetime(start_time, unit='ms').strftime(self.TIME_FORMAT),
                 pd.to_datetime(end_time,   unit='ms').strftime(self.TIME_FORMAT)
@@ -827,7 +885,7 @@ class BinanceDB:
             k_data.sort_index(inplace=True)
 
             if klines_only:
-                if output:
+                if self.verbosity >= 3:
                     print("   Klines loaded...                           {}".format(k_data.shape[0]))
                 return k_data
 
@@ -895,7 +953,7 @@ class BinanceDB:
                 'e_count'   : 'int64',
                 'e_time'    : 'int64'
             })
-            if output:
+            if self.verbosity >= 3:
                 print("   Klines / extremums / groups loaded...      {}/{}/{}".format(
                     k_data.shape[0], e_data.shape[0], g_data.shape[0]
                 ))
@@ -904,7 +962,8 @@ class BinanceDB:
 
     async def save_data(self, symbol_id, data_set):
 
-        if self.output: print("Saving data into DB ...")
+        if self.verbosity >= 3:
+            print("Saving data into DB ...")
 
         new_e     = data_set.e_data.drop(data_set.known_e.index)
         changed_e = data_set.e_data.drop(new_e.index)
@@ -1054,15 +1113,21 @@ class BinanceDB:
                 new_og['param_set_id'] = self.param_set_id
                 new_og['interval']     = self.interval
                 new_og['symbol_id']    = symbol_id
+                new_og['last_price']   = 0.0
+                last_idx = data_set.k_data.index[-1]
+                min_mask = new_og.index.get_level_values('minimum').to_numpy()
+                new_og.loc[ min_mask, 'last_price'] = data_set.k_data.at[last_idx, 'low']
+                new_og.loc[~min_mask, 'last_price'] = data_set.k_data.at[last_idx, 'high']
                 new_og.to_sql('open_groups', self.__db, if_exists='append')
 
-        if self.output:
+        if self.verbosity >= 3:
             print("   Extremums saved / updated...               {}/{}".format(new_e.shape[0], changed_e))
             print("   Groups saved / updated...                  {}/{}".format(new_g.shape[0], changed_g))
 
     async def delete_symbols(self, sym_names):
 
-        if self.output: print("Deleting symbols {}:".format(sym_names))
+        if self.verbosity >= 3:
+            print("Deleting symbols {}:".format(sym_names))
         delete_request = "DELETE FROM {} WHERE symbol_id IN " + str(
             tuple(map(lambda name: self.symbol_names[name], sym_names))
         ).replace(',)', ')')
@@ -1076,11 +1141,14 @@ class BinanceDB:
                 'symbol_limits',
                 'symbols'
             ]:
-                if self.output: print("   processing table {}...".format(tbl), end=" ", flush=True)
+                if self.verbosity >= 3:
+                    print("   processing table {}...".format(tbl), end=" ", flush=True)
                 cnt = self.__cursor.execute(delete_request.format(tbl)).rowcount
-                if self.output: print('{} records deleted.'.format(cnt))
+                if self.verbosity >= 3:
+                    print('{} records deleted.'.format(cnt))
             self.__db.commit()
-        if self.output: print("Symbols deleted.")
+        if self.verbosity >= 3:
+            print("Symbols deleted.")
 
     async def get_binance_data(self, symbol_id):
 
@@ -1089,7 +1157,8 @@ class BinanceDB:
         URL_ERROR_MSG  = "\n--- URL error:\n--- {}\n--- See {}."
         URL_ERROR_LOG  = "[{}] {}: {}"
 
-        print("Recieving Binance data...                    ", end=' ', flush=True)
+        if self.verbosity >= 3:
+            print("Recieving Binance data...                    ", end=' ', flush=True)
         msg = ''
         retry_left = self.__URL_RETRY
         while retry_left:
@@ -1101,7 +1170,7 @@ class BinanceDB:
                             "TIME_REQUEST", "", response.status, response.headers
                         ))
                         msg = HTTP_ERROR_MSG.format(response.status, _LOG_URL_ERRORS)
-                        print(msg)
+                        if self.verbosity >= 1: print(msg)
                         raise Exception(msg)
                 break
             except (url_err.URLError, TimeoutError) as error:
@@ -1111,13 +1180,15 @@ class BinanceDB:
                 if retry_left: await asyncio.sleep(10)
         if not retry_left:
             await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format("TIME_REQUEST", "", msg))
-            print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
+            if self.verbosity >= 2:
+                print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
             return False
 
         TIME_STEP     = self.params['TIME_STEP']
         max_data_time = self.symbols.at[symbol_id, 'max_data_time']
         if s_time - max_data_time < TIME_STEP:
-            print("new data not found.")
+            if self.verbosity >= 3:
+                print("new data not found.")
             return False
         start_time = max_data_time + TIME_STEP
 
@@ -1141,7 +1212,7 @@ class BinanceDB:
                             response.headers
                         ))
                         msg = HTTP_ERROR_MSG.format(response.status, _LOG_URL_ERRORS)
-                        print(msg)
+                        if self.verbosity >= 1: print(msg)
                         raise Exception(msg)
                 break
             except (url_err.URLError, TimeoutError) as error:
@@ -1149,21 +1220,24 @@ class BinanceDB:
                 await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format(
                     "KLINES_REQUEST", self.symbols.at[symbol_id, 'symbol_name'], msg
                 ))
-                print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
+                if self.verbosity >= 2:
+                    print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
                 retry_left -= 1
                 if retry_left: await asyncio.sleep(10)
         if not retry_left:
             await log_write(_LOG_URL_ERRORS, URL_ERROR_LOG.format(
                 "KLINES_REQUEST", self.symbols.at[symbol_id, 'symbol_name'], msg
             ))
-            print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
+            if self.verbosity >= 2:
+                print(URL_ERROR_MSG.format(msg, _LOG_URL_ERRORS))
             return False
         if new_data.shape[1] != 12:
             msg = "[KLINES_REQUEST] {}: abnormal result shape: {}".format(
                 self.symbols.at[symbol_id, 'symbol_name'], new_data.shape
             )
             await log_write(_LOG_URL_ERRORS, msg)
-            print("\n--- URL error:\n--- {}\n--- See {}.".format(msg, _LOG_URL_ERRORS))
+            if self.verbosity >= 2:
+                print("\n--- URL error:\n--- {}\n--- See {}.".format(msg, _LOG_URL_ERRORS))
             return False
 
         new_data.drop(columns=[6,7,9,10,11], inplace=True)
@@ -1201,7 +1275,8 @@ class BinanceDB:
             self.__update_limit(symbol_id, 'max_data_time', new_data.index[-1])
             self.__db.commit()
 
-        print("{} klines recieved.".format(new_data.shape[0]))
+        if self.verbosity >= 3:
+            print("{} klines recieved.".format(new_data.shape[0]))
         return True
 
     def __update_limit(self, symbol_id, field, new_value):

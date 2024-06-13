@@ -43,6 +43,7 @@ class KGraph:
     def __init__(self, classes, statuses, pic_size=(2850,1180), scale=5, renderer='browser'):
 
         self.__empty_df = pd.DataFrame()     
+        self.verbosity  = 1
 
         self.classes  = classes
         self.statuses = statuses
@@ -98,7 +99,8 @@ class KGraph:
     async def display_group(self, idx, stop='group', how='image', name=None):
         
         if self.k_data.empty or self.e_data.empty or self.g_data.empty or self.ge_data.empty:
-            print("\n--- Not enough data to display.\n")
+            if self.verbosity >= 2:
+                print("\n--- Not enough data to display.\n")
             return
         
         ISL = pd.IndexSlice
@@ -139,7 +141,8 @@ class KGraph:
     async def display_data(self, elements, how='screen', name=None, title=None, expand_k=True):
     
         if self.k_data.empty:
-            print("\n--- No klines data to display.\n")
+            if self.verbosity >= 2:
+                print("\n--- No klines data to display.\n")
             return
 
         last_time = self.k_data.at[self.k_data.index[-1], 'server_open_time']
@@ -178,7 +181,7 @@ class KGraph:
                     )
             if last_time  > self.k_data.at[self.k_data.index[-1], 'server_open_time'] or \
                first_time < self.k_data.at[self.k_data.index[0], 'server_open_time']:
-                db = BinanceDB([self.symbol], output=False)
+                db = BinanceDB([self.symbol])
                 self.set_data(k_data = await db.load_data(
                     db.symbol_names[self.symbol],
                     first_time,
@@ -243,7 +246,8 @@ class KGraph:
         # Ranges of groups
         if 'GROUP_RANGES' in elements:
             if self.g_data.empty:
-                print("\n--- No groups data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No groups data to display.\n")
                 return
             g_data = self.g_data.copy()
             g_data.loc[g_data.range > last_time, 'range'] = last_time # cutting down range for output
@@ -262,7 +266,8 @@ class KGraph:
         # Ranges of extremums
         if 'EXTREMUM_RANGES' in elements:
             if self.e_data.empty:
-                print("\n--- No extremums data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No extremums data to display.\n")
                 return
             e_data = self.e_data.copy()
             e_data.loc[e_data.range > last_time, 'range'] = last_time # cutting down range for output
@@ -283,7 +288,8 @@ class KGraph:
         #
         if 'LAST_EXTREMUM' in elements:
             if self.e_data.empty:
-                print("\n--- No extremums data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No extremums data to display.\n")
                 return
             e_data = self.e_data.loc[self.e_data.last_ex != 0]
             for ex in e_data.itertuples():
@@ -302,7 +308,8 @@ class KGraph:
         #
         if 'LAST_NON_EXTREMUM' in elements:
             if self.e_data.empty:
-                print("\n--- No extremums data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No extremums data to display.\n")
                 return
             e_data = self.e_data.loc[self.e_data.last_non_ex != 0]
             for ex in e_data.itertuples():
@@ -321,7 +328,8 @@ class KGraph:
         #
         if 'EX_HEIGHT' in elements:
             if self.e_data.empty:
-                print("\n--- No extremums data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No extremums data to display.\n")
                 return
             e_data = self.e_data.loc[self.e_data.height != 0.0]
             for ex in e_data.itertuples():
@@ -339,7 +347,8 @@ class KGraph:
         #
         if 'DERIVATIVE' in elements:
             if self.e_data.empty:
-                print("\n--- No extremums data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No extremums data to display.\n")
                 return
             e_data = self.e_data.loc[self.e_data.derivative != 0.0]
             fig.add_scatter(
@@ -354,7 +363,8 @@ class KGraph:
         #
         if 'GROUP_TOLERANCES' in elements:
             if self.g_data.empty:
-                print("\n--- No groups data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No groups data to display.\n")
                 return
             g_data = self.g_data.loc[self.g_data.g_tol != 0.0].join(self.e_data.price, on=['open_time', 'minimum'])
             fig.add_scatter(
@@ -371,7 +381,8 @@ class KGraph:
         # Ranks of groups
         if 'GROUP_RANKS' in elements:
             if self.g_data.empty:
-                print("\n--- No groups data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No groups data to display.\n")
                 return
             g_data = self.g_data.join(self.e_data.price, on=['open_time', 'minimum'])
             g_data = g_data.loc[self.g_data['rank'] >= 0.0]
@@ -411,7 +422,8 @@ class KGraph:
         # Results of groups
         if 'GROUP_RESULTS' in elements:
             if self.g_data.empty:
-                print("\n--- No groups data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No groups data to display.\n")
                 return
             g_data = self.g_data.loc[
                 (self.g_data.result_id != -1) &
@@ -465,7 +477,8 @@ class KGraph:
         # Next price movement
         if 'NEXT_PRICES' in elements:
             if self.e_data.empty:
-                print("\n--- No extremums data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No extremums data to display.\n")
                 return
             for ex in self.e_data.itertuples():
                 if ex.next_low != -1:
@@ -488,7 +501,8 @@ class KGraph:
         # Extremums of groups
         if 'GROUP_EXTREMUMS' in elements:
             if self.g_data.empty:
-                print("\n--- No groups data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No groups data to display.\n")
                 return
             last_e_time = self.ge_data.server_e_time.max()
             if last_e_time > self.e_data.server_open_time.max() and expand_k:
@@ -504,7 +518,7 @@ class KGraph:
                     (self.ge_data.open_time == i[0]) &
                     (self.ge_data.minimum   == i[1]) &
                     (self.ge_data.e_count   == i[2])
-                ].join(self.e_data.price, on=['e_time', 'minimum'])
+                ].join(self.e_data.price, on=['e_time', 'minimum'], how='inner')
                 fig.add_scatter(
                     x             = gr_list.e_time,
                     y             = gr_list.price,
@@ -518,7 +532,8 @@ class KGraph:
         # First rebounds of groups
         if 'REBOUNDS' in elements:
             if self.g_data.empty:
-                print("\n--- No groups data to display.\n")
+                if self.verbosity >= 2:
+                    print("\n--- No groups data to display.\n")
                 return
             g_data = self.g_data.loc[self.g_data.rebound != -1].join(self.e_data.price, on=['open_time', 'minimum'])
             fig.add_scatter(

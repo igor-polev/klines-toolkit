@@ -10,10 +10,10 @@ Created on Mon Oct 16 09:31:11 2023
 
 import pandas  as pd
 import asyncio
+import os
 
 from math     import floor, ceil, log10
 from datetime import datetime
-from numpy    import nan     as _NaN
 from sys      import argv    as sys_argv
 from getopt   import getopt  as sys_getopt
 from telegram import Bot     as telegram_bot
@@ -54,31 +54,39 @@ from kt_params import _BINANCE_FUTURES_URL
 from kt_params import _PARAM_SET
 from kt_params import _USE_BOTS
 from kt_params import _PROCESS_DATA
+from kt_params import _STOP_FILE
+from kt_params import _SERVICE_DIR
 
 class KTscript:
 
     def __init__(self, cmdl_params):
 
-        print("\n--- Binance data processing script ---\n")
-
-        self.exe_parts    = 1
+        self.exe_parts    = int(os.environ.get('KT_EXE_COUNT'))
+        if not self.exe_parts:
+            raise Exception("Environment variable KT_EXE_COUNT is undefined.")
         self.thread_num   = 0
         self.symbol_list  = _SYMBOL_FILTER
         self.param_set    = _PARAM_SET
-        self.wait_on_exit = False
-        opts, args = sys_getopt(cmdl_params, "p:e:t:s:w")
+        self.run_mode     = False
+        self.verbosity    = 1
+        opts, args = sys_getopt(cmdl_params, "p:t:s:v:r")
         try:
             for opt, arg in opts:
-                if   opt == '-e': self.exe_parts    = int(arg)
-                elif opt == '-t': self.thread_num   = int(arg)
-                elif opt == '-s': self.symbol_list  = [arg]
-                elif opt == '-w': self.wait_on_exit = True
-                elif opt == '-p': self.param_set    = arg
+                if   opt == '-t': self.thread_num   = int(arg) # id of current executing processes (staring from 0)
+                elif opt == '-s': self.symbol_list  = [arg]    # list of symbols to process
+                elif opt == '-p': self.param_set    = arg      # redefinition of param_set_id
+                elif opt == '-v': self.verbosity    = int(arg) # level of verbosity
+                elif opt == '-r': self.run_mode     = True     # start processing immediately
             if self.exe_parts < 1 or self.thread_num >= self.exe_parts or self.thread_num < 0:
                 raise Exception()
         except:
             raise Exception("Bad command line arguments.")
-        print("Thread {} of expected {}.".format(self.thread_num + 1, self.exe_parts))
+        if not self.run_mode and not os.path.exists(_STOP_FILE):
+            open(_STOP_FILE, 'x').close()
+
+        if self.verbosity >= 1:
+            print("\n--- Binance data processing script ---\n")
+            print("Thread {} of expected {}.".format(self.thread_num + 1, self.exe_parts))
 
         if _IGNORE_SETTING_WITH_COPY_WARNING:
             pd.set_option('mode.chained_assignment', None)
@@ -89,20 +97,22 @@ class KTscript:
             subset = {'rem' : self.thread_num, 'div' : self.exe_parts}
         else:
             subset = None
-        self.db          = BinanceDB(self.symbol_list, subset, self.param_set)
+        self.db = BinanceDB(self.symbol_list, subset, self.param_set)
+        self.db.verbosity = self.verbosity
 
         if _USE_BOTS:
             self.bot_monitor = telegram_bot(_BOT_TOKEN_MONITOR)
             self.bot_alerts  = telegram_bot(_BOT_TOKEN_ALERTS)
-            self.BOT_MONITOR_LOCK = 'kt_bot_monitor'
-            self.BOT_ALERTS_LOCK  = 'kt_bot_alerts'
+            self.BOT_MONITOR_LOCK = _SERVICE_DIR + 'kt_bot_monitor'
+            self.BOT_ALERTS_LOCK  = _SERVICE_DIR + 'kt_bot_alerts'
 
         self.data_chunk  = _DATA_CHUNK
         self.new_data    = None
         self.symbol      = None
 
     def init_after_db(self):
-        self.ka    = KAnalizer(self.db.params)
+        self.ka = KAnalizer(self.db.params)
+        self.ka.verbosity = self.verbosity
         self.graph = KGraph(
             self.db.classes,
             self.db.statuses,
@@ -110,6 +120,7 @@ class KTscript:
             scale=10,
             renderer='png'
         )
+        self.graph.verbosity = self.verbosity
         self.DISTANCE    = self.db.params['EXTR_FRAME_SIZE']
         self.TIME_STEP   = self.db.params['TIME_STEP']
         self.MAX_D_FRAME = self.TIME_STEP * max(
@@ -166,7 +177,8 @@ class KTscript:
 
         if not _USE_BOTS: return
 
-        print("Checking Telegram bot...                     ", end=' ', flush=True)
+        if self.verbosity >= 3:
+            print("Checking Telegram bot...                     ", end=' ', flush=True)
         replies = []
         texts   = []
         await file_lock(self.BOT_MONITOR_LOCK, raise_on_failure=False)
@@ -185,9 +197,30 @@ class KTscript:
                         texts.append(u.message.text.upper())
         except telegram_error.TelegramError as error:
             await log_write(_LOG_TELEGRAM_ERRORS, "{} : {}".format(type(error), error))
+
+        if self.run_mode and 'STOP' in texts:
+            self.run_mode = False
+            if not os.path.exists(_STOP_FILE):
+                open(_STOP_FILE, 'x').close()
+                msg = "Stopping data processing..."
+            texts.remove('STOP')
+        elif not self.run_mode and 'START' in texts:
+            self.run_mode = True
+            if os.path.exists(_STOP_FILE):
+                os.remove(_STOP_FILE)
+                msg = "Starting data processing..."
+            texts.remove('START')
+        else:
+            msg = ''
+        if 'START' in texts: texts.remove('START')
+        if 'STOP'  in texts: texts.remove('STOP')
         file_unlock(self.BOT_MONITOR_LOCK)
+        if msg:
+            await self.telegram_message('text', msg)
+
         if not replies and not texts:
-            print("nothing new.")
+            if self.verbosity >= 3:
+                print("nothing new.")
             return
         open_g = await self.db.get_open_groups()
         if replies:
@@ -216,36 +249,47 @@ class KTscript:
                 if resend:
                     for idx in resend: await self.telegram_message('fwd', idx)
 
-        print("{} replies processed.".format(len(replies)))
+        if self.verbosity >= 3:
+            print("{} replies processed.".format(len(replies)))
 
     async def monitor_prices(self, symbol_id):
 
         if not _USE_BOTS: return
 
         open_g  = await self.db.get_open_groups(symbol_id)
-        open_g  = open_g.loc[open_g.monitor != 0]
         if open_g.empty: return
 
-        print("Monitoring selected cases...                 ", end=' ', flush=True)
-        open_g['symbol_id']  = symbol_id
-        open_g['msg']        = _NaN
-        open_g['crossed']    = False
-        open_g['new_time']   = open_g.monitor
-        open_g['last_price'] = 0.0
-
         end_time = self.db.symbols.at[symbol_id, 'max_data_time']
+        self.db.verbosity = 1
         k_data   = await self.db.load_data(
             symbol_id,
             end_time - self.DISTANCE * self.TIME_STEP,
             end_time,
-            klines_only = True,
-            output      = False
+            klines_only = True
         )
+        self.db.verbosity = self.verbosity
         high_price = k_data.high.iat[-1]
         low_price  = k_data.low.iat[-1]
+        await self.db.mark_open_groups(pd.DataFrame(
+            data = [
+                [symbol_id, True,  low_price],
+                [symbol_id, False, high_price]
+            ],
+            columns = ['symbol_id', 'minimum', 'last_price'],
+        ), 'last_price')
+
+        open_g  = open_g.loc[open_g.monitor != 0]
+        if open_g.empty: return
+
+        if self.verbosity >= 3:
+            print("Monitoring selected cases...                 ", end=' ', flush=True)
+        open_g['symbol_id']  = symbol_id
+        open_g['msg']        = ""
+        open_g['crossed']    = False
+        open_g['new_time']   = open_g.monitor
+
         up_speed   = (high_price - k_data.high.iat[0]) / self.DISTANCE
         down_speed = (k_data.low.iat[0] - low_price) / self.DISTANCE
-
         change_m_time = False
         for g in open_g.itertuples():
             if g.Index[1]:
@@ -274,25 +318,25 @@ class KTscript:
                         m_idx -= 1
                     open_g.at[g.Index, 'new_time'] = _MONITOR_TIMES[m_idx]
                     change_m_time = True
-            open_g.at[g.Index, 'last_price'] = the_price
-        await self.db.mark_open_groups(open_g[['symbol_id', 'last_price']], 'last_price')
         if change_m_time:
             await self.db.mark_open_groups(
                 open_g.loc[open_g.monitor != open_g.new_time, ['symbol_id', 'new_time']],
                 'next_monitor_time'
             )
 
-        open_g.dropna(subset='msg', inplace=True)
+        open_g.drop(open_g.loc[open_g.msg == ""].index, inplace=True)
         if open_g.empty:
-            print("nothing to report")
+            if self.verbosity >= 3:
+                print("nothing to report")
             return
         s_name = self.db.symbols.at[symbol_id, 'symbol_name']
+        self.db.verbosity = 1
         k_data, e_data, g_data, ge_data = await self.db.load_data(
             symbol_id,
             open_g.index.get_level_values('open_time').min() - self.graph.GT_DELTA,
-            end_time,
-            output = False
+            end_time
         )
+        self.db.verbosity = self.verbosity
         self.graph.set_data(s_name, k_data, e_data, g_data, ge_data)
         sent_cnt = open_g.shape[0]
         for g in open_g.itertuples():
@@ -311,7 +355,8 @@ class KTscript:
                     retry = 20
                 )
             if int == type(msg): sent_cnt -= 1
-        print("{}/{} notifications sent / failed".format(sent_cnt, open_g.shape[0] - sent_cnt))
+        if self.verbosity >= 3:
+            print("{}/{} notifications sent / failed".format(sent_cnt, open_g.shape[0] - sent_cnt))
 
     async def report_archived_groups(self):
 
@@ -322,22 +367,26 @@ class KTscript:
         last_archived = await self.db.get_open_groups(archived = check_time[0])
         if last_archived.empty: return
 
-        print("Reporting arcived groups...                  ", end=' ', flush=True)
+        if self.verbosity >= 3:
+            print("Reporting arcived groups...                  ", end=' ', flush=True)
         sent_cnt = last_archived.shape[0]
         for g in last_archived.itertuples():
             msg = await self.telegram_message('text', "The case is archived.", rep_id=g.posted_id)
             if int == type(msg): sent_cnt -= 1
-        print("{}/{} notifications sent / failed".format(sent_cnt, last_archived.shape[0] - sent_cnt))
+        if self.verbosity >= 3:
+            print("{}/{} notifications sent / failed".format(sent_cnt, last_archived.shape[0] - sent_cnt))
 
     async def send_open_groups(self, symbol_id):
 
         if not _USE_BOTS: return
 
-        print("Checking new active groups...                ", end=' ', flush=True)
+        if self.verbosity >= 3:
+            print("Checking new active groups...                ", end=' ', flush=True)
         open_g = await self.db.get_open_groups(symbol_id)
         open_g = open_g.loc[open_g.posted_id == 0]
         if open_g.empty:
-            print("not found.")
+            if self.verbosity >= 3:
+                print("not found.")
         else:
             self.graph.set_data(
                 self.symbol.symbol_name,
@@ -365,14 +414,17 @@ class KTscript:
                     open_g.at[g.Index, 'posted_id'] = msg.message_id
             open_g['symbol_id'] = self.symbol.Index
             await self.db.mark_open_groups(open_g[['symbol_id', 'posted_id']], 'mark_posted')
-            print("{}/{} new groups sent / failed.".format(sent_cnt, open_g.shape[0] - sent_cnt))
+            if self.verbosity >= 3:
+                print("{}/{} new groups sent / failed.".format(sent_cnt, open_g.shape[0] - sent_cnt))
 
     async def check_zero_trades(self):
         zero_trades = self.new_data.loc[self.new_data.volume == 0.0].index
         if zero_trades.empty:
-            print('   Zero trades check finished - no issues.')
+            if self.verbosity >= 3:
+                print('   Zero trades check finished - no issues.')
             return self.new_data.index[-1]
-        print('--- Some zero trades detected...')
+        if self.verbosity >= 3:
+            print('--- Some zero trades detected...')
         nei_zero_cnt   = 1
         prev_zero_time = zero_trades[0]
         for zero_time in zero_trades[1:]:
@@ -386,7 +438,8 @@ class KTscript:
                     last_non_zero + self.TIME_STEP,
                     unit='ms'
                 ).strftime(self.db.TIME_FORMAT)
-                print("--- Critical count of zero trades detected at {}!".format(date_time))
+                if self.verbosity >= 2:
+                    print("--- Critical count of zero trades detected at {}!".format(date_time))
                 await log_write(_LOG_ZERO_TRADES, "{id}\t{sym}\t{dt}\t{zt} zero trades detected".format(
                     id  = self.symbol.Index,
                     sym = self.symbol.symbol_name,
@@ -436,7 +489,8 @@ class KTscript:
 
         if real_tick != self.ka.tick_size:
             if self.f_check_tick:
-                print("--- Detected tick size {} differes from DB tick size {}!".format(real_tick, self.ka.tick_size))
+                if self.verbosity >= 2:
+                    print("--- Detected tick size {} differes from DB tick size {}!".format(real_tick, self.ka.tick_size))
                 await log_write(_LOG_TICK_CHANGES, "{id}\t{sym}\t{db_tk}\t{dt_tk} DB / detected tick.".format(
                     id    = self.symbol.Index,
                     sym   = self.symbol.symbol_name,
@@ -462,9 +516,11 @@ class KTscript:
                     new_end_time = min(last_end_time + self.data_chunk, max_k_time)
                 self.new_data = self.new_data.truncate(after = new_end_time)
                 self.f_check_tick = False
-                print("--- Tick change procedure initiated, loaded data truncated.")
+                if self.verbosity >= 3:
+                    print("--- Tick change procedure initiated, loaded data truncated.")
             else:
-                print("--- Tick change procedure complete, reloading data...")
+                if self.verbosity >= 3:
+                    print("--- Tick change procedure complete, reloading data...")
                 self.data_chunk   = _DATA_CHUNK
                 new_end_time      = min(last_end_time + self.data_chunk, max_k_time)
                 self.new_data     = await self.db.load_data(
@@ -478,11 +534,15 @@ class KTscript:
                 self.f_check_tick = True
             return new_end_time
         else:
-            print('   Tick size check finished - no issues.')
+            if self.verbosity >= 3:
+                print('   Tick size check finished - no issues.')
             return end_time
 
     async def go_to_sleep(self, seconds):
         t = ceil(seconds)
+        if self.verbosity < 3:
+            await asyncio.sleep(t)
+            return
         while t > 0:
             print("All done, time to sleep a little...           {} seconds left    ".format(t), end='\r', flush=True)
             await asyncio.sleep(1)
@@ -500,7 +560,7 @@ class KTscript:
 
     async def iterate(self):
 
-        if not _RECLASSIFY and (_USE_BOTS or _GET_NEW_DATA):
+        if _USE_BOTS or _GET_NEW_DATA:
             the_time = datetime.now().timestamp()
             may_sleep_get = _SYM_REQ_INTERVAL   - the_time + self.db.symbols.last_req.min()
             may_sleep_bot = _BOT_CHECK_INTERVAL - the_time + await self.db.get_variable('bot_check_time')
@@ -517,29 +577,50 @@ class KTscript:
         sym_total = self.db.symbols.shape[0]
         for sym in self.db.symbols.itertuples():
 
-            if not _RECLASSIFY and _USE_BOTS and await self.poke_interval('bot_check_time', _BOT_CHECK_INTERVAL):
+            if _USE_BOTS and await self.poke_interval('bot_check_time', _BOT_CHECK_INTERVAL):
                 await self.check_bot()
+            if self.run_mode and os.path.exists(_STOP_FILE):
+                self.run_mode = False
+            if not self.run_mode and _USE_BOTS:
+                await self.telegram_message(
+                    'text',
+                    "Thread {} of {} stopped.".format(self.thread_num + 1, self.exe_parts)
+                )
+            while not self.run_mode:
+                if not os.path.exists(_STOP_FILE):
+                    self.run_mode = True
+                else:
+                    await self.go_to_sleep(_BOT_CHECK_INTERVAL * 2)
+                    if _USE_BOTS and await self.poke_interval('bot_check_time', _BOT_CHECK_INTERVAL):
+                        await self.check_bot()
+                if self.run_mode and _USE_BOTS:
+                    await self.telegram_message(
+                        'text',
+                        "Thread {} of {} started.".format(self.thread_num + 1, self.exe_parts)
+                    )
 
             sym_num += 1
-            if sym_num == 1:
+            if sym_num == 1 and self.verbosity >= 3:
                 start_datetime = datetime.now()
                 print("\n\n====================================================\nData processing started at {}\n\n".format(
                     start_datetime.strftime("%d.%m.%y %H:%M:%S")))
-            print("\n--------------------------\nProcessing {} ({}/{})\n--------------------------\n".format(
-                sym.symbol_name, sym_num, sym_total))
+            if self.verbosity >= 3:
+                print("\n--------------------------\n")
+            if self.verbosity >= 1:
+                print("Processing {} ({}/{})".format(sym.symbol_name, sym_num, sym_total))
+            if self.verbosity >= 3:
+                print("\n--------------------------\n")
 
             self.symbol       = sym
             self.ka.tick_size = sym.tick_size
             self.ka.clear_k_data()
 
-            if not _RECLASSIFY and _GET_NEW_DATA:
-                the_time  = datetime.now().timestamp()
-                may_sleep = _SYM_REQ_INTERVAL - the_time + sym.last_req
+            if _GET_NEW_DATA:
+                may_sleep = _SYM_REQ_INTERVAL - datetime.now().timestamp() + sym.last_req
                 if may_sleep > 0.0:
                     await self.go_to_sleep(may_sleep)
-                    the_time = datetime.now().timestamp()
-                self.db.symbols.at[sym.Index, 'last_req'] = the_time
                 if await self.db.get_binance_data(sym.Index):
+                    self.db.symbols.at[sym.Index, 'last_req'] = datetime.now().timestamp()
                     await self.monitor_prices(sym.Index)
             if not _PROCESS_DATA: continue
 
@@ -548,7 +629,8 @@ class KTscript:
             max_e_time  = self.db.symbols.at[sym.Index, 'max_e_time']
             open_g_time = self.db.symbols.at[sym.Index, 'open_g_time']
             if _CHECK_NEW_DATA and (max_k_time - max_e_time) // self.TIME_STEP < _MIN_NEW_KLINES and not _RECLASSIFY:
-                print("\n--- Insufficient new klines data - calculations unnecessary\n")
+                if self.verbosity >= 3:
+                    print("\n--- Insufficient new klines data - calculations unnecessary\n")
                 continue
 
             if _RECLASSIFY:
@@ -560,7 +642,8 @@ class KTscript:
             self.new_data, self.ka.known_e, self.ka.known_g, self.ka.known_ge = \
                 await self.db.load_data(sym.Index, start_time, end_time)
             if self.new_data.empty:
-                print("\n--- No klines data loaded - abnormal case?\n")
+                if self.verbosity >= 2:
+                    print("\n--- No klines data loaded - abnormal case?\n")
                 msg = "{}: no klines data loaded - abnormal case?".format(sym.symbol_name)
                 await log_write(_LOG_UNKNOWN_ERRORS, msg)
                 if _USE_BOTS:
@@ -570,9 +653,9 @@ class KTscript:
             last_end_time = -1
             while end_time != last_end_time:
 
-                if (_CHECK_ZERO_TRADES or _CHECK_TICK_SIZE) and not _RECLASSIFY:
+                if (_CHECK_ZERO_TRADES or _CHECK_TICK_SIZE) and self.verbosity >= 3:
                     print("Checking klines data integrity...")
-                if _CHECK_ZERO_TRADES and not _RECLASSIFY:
+                if _CHECK_ZERO_TRADES:
                     last_non_zero = await self.check_zero_trades()
                     if last_non_zero != self.new_data.index[-1]:
                         await self.db.truncate_klines(sym.Index, last_non_zero)
@@ -581,18 +664,22 @@ class KTscript:
                             self.new_data = self.new_data.truncate(after = last_non_zero)
                             end_time = last_non_zero
                         else:
-                            print("--- All new data is zero, skipping the coin.\n")
+                            if self.verbosity >= 3:
+                                print("--- All new data is zero, skipping the coin.\n")
                             break
 
-                if _CHECK_TICK_SIZE and not _RECLASSIFY:
+                if _CHECK_TICK_SIZE:
                     end_time = await self.check_tick_zise(start_time, end_time, last_end_time, max_k_time)
                     if end_time == -1:
-                        print("--- Skipping the coin!\n")
+                        if self.verbosity >= 3:
+                            print("--- Skipping the coin!\n")
                         break
 
-                print("Processing data...")
+                if self.verbosity >= 3:
+                    print("Processing data...")
                 self.ka.add_k_data(self.new_data)
-                print("   Klines / extremums / groups in memory...   {}/{}/{}".format(
+                if self.verbosity >= 3:
+                    print("   Klines / extremums / groups in memory...   {}/{}/{}".format(
                     self.ka.k_data.shape[0], self.ka.known_e.shape[0], self.ka.known_g.shape[0]))
                 self.ka.process_data(self.db.statuses, self.db.classes)
                 await self.db.save_data(sym.Index, self.ka)
@@ -606,17 +693,18 @@ class KTscript:
                 if end_time != last_end_time:
                     self.new_data = await self.db.load_data(sym.Index, start_time, end_time, klines_only=True)
 
-                if not _RECLASSIFY and _USE_BOTS:
+                if _USE_BOTS:
                     await self.report_archived_groups()
-                
-            if _SEND_OPEN_GROUPS and not _RECLASSIFY and _USE_BOTS:
+
+            if _SEND_OPEN_GROUPS:
                 await self.send_open_groups(sym.Index)
 
         end_datetime = datetime.now()
-        print('\nData processing finished at {}, elapsed time is {}.\n'.format(
-            end_datetime.strftime("%d.%m.%y %H:%M:%S"),
-            end_datetime - start_datetime
-        ))
+        if self.verbosity >= 3:
+            print('\nData processing finished at {}, elapsed time is {}.\n'.format(
+                end_datetime.strftime("%d.%m.%y %H:%M:%S"),
+                end_datetime - start_datetime
+            ))
 
     async def run(self):
         try:
@@ -645,5 +733,3 @@ class KTscript:
 if __name__ == "__main__":
     script = KTscript(sys_argv[1:])
     asyncio.run(script.run())
-    if script.wait_on_exit:
-        input("\nPress 'Enter' to exit...")

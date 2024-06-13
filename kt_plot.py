@@ -8,9 +8,9 @@ Created on Mon Nov 15 15:09:00 2023
 @author: IGOR POLEV
 """
 
-_SYM   = 'BTCSTUSDT'
-_START = '2021-03-12'
-_DAYS  = 5
+_SYM   = 'RADUSDT'
+_START = '2024-05-04'
+_DAYS  = 2
 
 
 from sys import maxsize as _MAXINT
@@ -36,7 +36,13 @@ async def show_plot(sym_name, day_start, day_cnt):
     
     db = BinanceDB([sym_name])
     await db.setup()
-    graph = KGraph(classes=db.classes, statuses=db.statuses, scale=5, renderer='browser')
+    graph = KGraph(
+        classes=db.classes,
+        statuses=db.statuses,
+        pic_size=(2268, 1285),
+        scale=5,
+        renderer='browser'
+    )
 
     start_time = int(pd.to_datetime(day_start).timestamp()) * 1000
     end_time   = start_time + day_cnt * 86400000
@@ -53,13 +59,13 @@ async def show_plot(sym_name, day_start, day_cnt):
         
     await graph.display_data([
         'VOLUMES',
-        # 'GROUP_RANGES',
+        'GROUP_RANGES',
         # 'EXTREMUM_RANGES',
         # 'GROUP_RANKS',
         # 'LAST_EXTREMUM',
         # 'LAST_NON_EXTREMUM',
         # 'EX_HEIGHT',
-        # 'GROUP_EXTREMUMS',
+        'GROUP_EXTREMUMS',
         # 'EXTREMUMS',
         # 'DERIVATIVE',
         # 'GROUP_TOLERANCES',

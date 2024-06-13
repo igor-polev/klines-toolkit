@@ -22,8 +22,9 @@ class KAnalizer:
 
     def __init__(self, params):
 
-        self.params     = params
-        self.tick_size  = None
+        self.params    = params
+        self.tick_size = None
+        self.verbosity = 1
         
         # params for distance penalty function
         self.dp_a = 24.0
@@ -149,8 +150,9 @@ class KAnalizer:
                 return _MAXINT
             return limit_set.index[0]
 
-        print("   Searching for local extremums ...         ", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("   Searching for local extremums ...         ", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
         min_found = []
         max_found = []
         if self.known_e.empty:
@@ -161,10 +163,10 @@ class KAnalizer:
             sk_data = self.k_data.truncate(before = i - E_FRAME, after = i + E_FRAME)
             if i == sk_data.low.idxmin(): min_found.append(i)
             if i == sk_data.high.idxmax(): max_found.append(i)
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
-
-        print("   Evaluating volume, range and roundness ...", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+            print("   Evaluating volume, range and roundness ...", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
 
         e_data  = self.__e_empty.copy()
         se_data = self.__e_empty.copy()
@@ -319,12 +321,13 @@ class KAnalizer:
         if not e_data.empty:
             e_data.set_index('minimum', append=True, inplace=True)
             e_data.sort_index(inplace=True)
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
 
         if e_data.index.has_duplicates: raise Exception("Duplicate extremums detected.")
 
-        print("   Evaluating area and derivative ...        ", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+            print("   Evaluating area and derivative ...        ", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
 
         min_data = e_data.xs(True,  level='minimum')
         max_data = e_data.xs(False, level='minimum')
@@ -365,10 +368,10 @@ class KAnalizer:
                 e_data.at[i, 'height']      = abs(e_price - sk_data.at[last_ex, 'price'])
                 e_data.at[i, 'derivative']  = abs((e_price - self.k_data.at[ex_time - E_FRAME, e_field]) / e_price)
 
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
-
-        print("   Searching for subsequent prices ...       ", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+            print("   Searching for subsequent prices ...       ", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
 
         last_k = self.k_data.index[-1]
         mask_min = e_data.index.get_level_values('minimum').to_numpy()
@@ -448,7 +451,8 @@ class KAnalizer:
                         e_data.at[i, e_field] = new_value
                         e_data.at[i, 'changed'] = True
 
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
         if e_data.empty:
             self.e_data = self.known_e.copy()
         else:
@@ -512,8 +516,9 @@ class KAnalizer:
         TOO_OLD   = self.params['TOO_OLD_LIMIT'] * TIME_STEP
         ISL = pd.IndexSlice
 
-        print("   Collecting extremums in primary groups ...", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("   Collecting extremums in primary groups ...", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
 
         if self.known_e.empty:
             first_new = 0
@@ -662,12 +667,13 @@ class KAnalizer:
         g_data.set_index('e_count', append=True, inplace=True)
         g_data.sort_index(inplace=True)
         ge_data.sort_values(['open_time', 'minimum', 'e_count', 'e_time'], ignore_index=True, inplace=True)
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
 
         if g_data.index.has_duplicates: raise Exception("Duplicate groups detected after primary groups collection.")
 
-        print("   Additional groups processing ...          ", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+            print("   Additional groups processing ...          ", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
 
         # Secondary groups
 
@@ -783,7 +789,8 @@ class KAnalizer:
 
         self.g_data  = g_data
         self.ge_data = ge_data
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
 
     def classify_groups(self, statuses, classes):
 
@@ -809,8 +816,9 @@ class KAnalizer:
         def distance_penalty(x):
             return 1.0 / (1.0 + exp(self.dp_k * (x - self.dp_a)))
 
-        print("   Groups classification ...                 ", end=' ', flush=True)
-        t_start = datetime.now().timestamp()
+        if self.verbosity >= 3:
+            print("   Groups classification ...                 ", end=' ', flush=True)
+            t_start = datetime.now().timestamp()
 
         TIME_STEP   = self.params['TIME_STEP']
         TOO_OLD     = self.params['TOO_OLD_LIMIT'] * TIME_STEP
@@ -950,21 +958,6 @@ class KAnalizer:
                 # other extremums are weighted according to their v_factor value: smallest v_factor goes with smallest weight etc.
                 gr_list.iloc[1:, gr_list.shape[1]-1] = gr_list.v_factor.iloc[1:].sort_values().array * gr_list.d_factor.iloc[1:].sort_values().array
 
-# =============================================================================
-#                 # DEBUG
-#                 if gr.Index == (1705587300000,False,3):
-#                     print("\n\nr_factor = ", gr.r_factor)
-#                     for e in gr_list.itertuples():
-#                         print("v_factor(e) = {}".format(e.v_factor))
-#                         print("d_factor(e) = {}".format(e.d_factor))
-#                         print("vd_factor(e) =", e.vd_factor)
-#                     print("vd_factor_total =", gr_list.vd_factor.sum())
-#                     for e in gr_list.sort_values('price').itertuples():
-#                         print("e_price =", e.price)
-#                     print("p_factor =", eval_price_variance(gr_list.price))
-#                     input()
-# =============================================================================
-
                 cl_data.at[gr.Index, 'rank'] = gr.r_factor * gr_list.vd_factor.sum() * eval_price_variance(gr_list.price)
                 # secondary groups are non-resultative and closed by definition
                 cl_data.at[gr.Index, 'status_id'] = statuses['CLOSED']
@@ -1026,7 +1019,8 @@ class KAnalizer:
         g_data.drop(columns=['rank_old', 'result_old', 'result_id_old', 'status_id_old'], inplace=True)
 
         self.g_data.loc[g_data.index] = g_data
-        print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
+        if self.verbosity >= 3:
+            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
 
     def process_data(self, statuses, classes):
         t_start = datetime.now().timestamp()
@@ -1038,12 +1032,13 @@ class KAnalizer:
             self.find_extremums()
             self.collect_groups(statuses)
         self.classify_groups(statuses, classes)
-        print("   -------\n   Total time spent...                        {:.1f} seconds".format(
-            datetime.now().timestamp() - t_start))
-        print("   New extremums / groups found...            {}/{}".format(
-            self.e_data.shape[0] - self.known_e.shape[0],
-            self.g_data.shape[0] - self.known_g.shape[0]
-        ))
+        if self.verbosity >= 3:
+            print("   -------\n   Total time spent...                        {:.1f} seconds".format(
+                datetime.now().timestamp() - t_start))
+            print("   New extremums / groups found...            {}/{}".format(
+                self.e_data.shape[0] - self.known_e.shape[0],
+                self.g_data.shape[0] - self.known_g.shape[0]
+            ))
 
     def trim_data(self, start_time):
         if start_time > self.k_data.index[0]:
