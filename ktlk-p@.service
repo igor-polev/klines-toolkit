@@ -1,0 +1,12 @@
+[Unit]
+Description=Klines Toolkit processing thread %i
+After=network.target
+
+[Service]
+Type=simple
+Nice=10
+Environment="KT_EXE_COUNT=4"
+ExecStart=/usr/bin/python3 /home/igor/Crypto/kt_script.py -t %i
+
+[Install]
+WantedBy=multi-user.target
