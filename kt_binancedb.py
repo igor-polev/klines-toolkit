@@ -82,17 +82,14 @@ class BinanceDB:
                     r_weight,
                     v_factor,
                     r_factor,
+                    a_factor,
                     tolerance,
                     high_tol,
                     low_tol,
                     next_high_time AS next_high,
                     next_high_closed,
                     next_low_time AS next_low,
-                    next_low_closed,
-                    last_ex_time AS last_ex,
-                    last_non_ex_time AS last_non_ex,
-                    height,
-                    derivative
+                    next_low_closed
                 FROM extremums
                 WHERE
                     interval     = {interval}   AND
@@ -213,10 +210,7 @@ class BinanceDB:
                     price       = :price,
                     v_factor    = :v_factor,
                     r_factor    = :r_factor,
-                    last_ex     = :last_ex,
-                    last_non_ex = :last_non_ex,
-                    height      = :height,
-                    derivative  = :derivative
+                    a_factor    = :r_factor
                 WHERE
                     interval     = {interval} AND
                     param_set_id = {p_id}     AND
@@ -511,7 +505,7 @@ class BinanceDB:
                     )
             """.format(
                 min_rank  = _MIN_MONITOR_RANK,
-                class_ids = "('{}', '{}')".format(
+                class_ids = "({}, {})".format(
                     self.classes['PIERCE_READY'],
                     self.classes['FIRST_TOUCH']
                 ),
@@ -698,20 +692,17 @@ class BinanceDB:
                 self.__db, index_col='symbol_id'
             ).join(sym_limits)
 
-        self.symbols.open_g_time.mask(
+        self.symbols.open_g_time = self.symbols.open_g_time.mask(
             self.symbols.open_g_time.isna() & self.symbols.max_e_time.isna(),
-            self.symbols.min_data_time,
-            inplace=True
+            self.symbols.min_data_time
         )
-        self.symbols.open_g_time.mask(
+        self.symbols.open_g_time = self.symbols.open_g_time.mask(
             self.symbols.open_g_time.isna(),
-            self.symbols.max_e_time + self.params['TIME_STEP'],
-            inplace=True
+            self.symbols.max_e_time + self.params['TIME_STEP']
         )
-        self.symbols.max_e_time.mask(
+        self.symbols.max_e_time = self.symbols.max_e_time.mask(
             self.symbols.max_e_time.isna(),
-            self.symbols.min_data_time - self.params['TIME_STEP'],
-            inplace=True
+            self.symbols.min_data_time - self.params['TIME_STEP']
         )
         self.symbols = self.symbols.astype({'open_g_time':'int64', 'max_e_time':'int64'})
         self.symbols['last_req'] = 0.0
@@ -901,17 +892,14 @@ class BinanceDB:
                 'r_weight'         : 'int64',
                 'v_factor'         : 'float64',
                 'r_factor'         : 'float64',
+                'a_factor'         : 'float64',
                 'tolerance'        : 'float64',
                 'low_tol'          : 'float64',
                 'high_tol'         : 'float64',
                 'next_high'        : 'int64',
                 'next_high_closed' : 'bool',
                 'next_low'         : 'int64',
-                'next_low_closed'  : 'bool',
-                'last_ex'          : 'int64',
-                'last_non_ex'      : 'int64',
-                'height'           : 'float64',
-                'derivative'       : 'float64'
+                'next_low_closed'  : 'bool'
             })
             e_data.set_index(['open_time','minimum'], inplace=True)
             e_data.sort_index(inplace=True)
@@ -987,9 +975,7 @@ class BinanceDB:
         new_e.rename(columns={
             'range'       : 'range_time',
             'next_high'   : 'next_high_time',
-            'next_low'    : 'next_low_time',
-            'last_ex'     : 'last_ex_time',
-            'last_non_ex' : 'last_non_ex_time'
+            'next_low'    : 'next_low_time'
         }, inplace=True)
         new_e.drop(columns='changed', inplace=True)
         new_e['param_set_id'] = self.param_set_id
@@ -1033,7 +1019,10 @@ class BinanceDB:
         new_g['symbol_id']    = symbol_id
 
         new_ge = data_set.ge_data.set_index(['open_time', 'minimum', 'e_count', 'e_time'])
-        new_ge.drop(data_set.known_ge.set_index(['open_time', 'minimum', 'e_count', 'e_time']).index, inplace=True)
+        new_ge.drop(
+            data_set.known_ge.set_index(['open_time', 'minimum', 'e_count', 'e_time']).index,
+            inplace=True
+        )
         new_ge['param_set_id'] = self.param_set_id
         new_ge['interval']     = self.interval
         new_ge['symbol_id']    = symbol_id
@@ -1052,14 +1041,8 @@ class BinanceDB:
             ].join(data_set.e_data[[
                 'price',
                 'v_factor',
-                'last_ex',
-                'last_non_ex',
-                'height',
-                'derivative'
+                'a_factor'
             ]], on=['open_time', 'minimum'])
-            g_time = new_og.index.get_level_values('open_time')
-            new_og['last_ex']      = (g_time - new_og.last_ex)     // self.params['TIME_STEP']
-            new_og['last_non_ex']  = (g_time - new_og.last_non_ex) // self.params['TIME_STEP']
             new_og['delta_tol']    = new_og.high_tol - new_og.low_tol
             new_og.drop(columns=['low_tol', 'high_tol'], inplace=True)
 

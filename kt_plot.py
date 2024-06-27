@@ -8,9 +8,9 @@ Created on Mon Nov 15 15:09:00 2023
 @author: IGOR POLEV
 """
 
-_SYM   = 'RADUSDT'
-_START = '2024-05-04'
-_DAYS  = 2
+_SYM   = 'ADAUSDT'
+_START = '2021-01-01'
+_DAYS  = 14
 
 
 from sys import maxsize as _MAXINT
@@ -52,6 +52,7 @@ async def show_plot(sym_name, day_start, day_cnt):
     # g_data = g_data.loc[(g_data.class_id == db.classes['UNKNOWN']) | (g_data.status_id == db.statuses['UNDEFINED'])]
     # g_data = g_data.loc[(g_data.class_id == db.classes['PIERCE_READY']) & (g_data.status_id == db.statuses['CLOSED'])]
     # g_data = g_data.loc[(g_data.class_id == db.classes['SECOND_TOUCH']) & (g_data.result_id != -1)]
+    g_data = g_data.loc[g_data.class_id == db.classes['FIRST_TOUCH']]
     # e_data = e_data.xs(False, level='minimum', drop_level=False)
 
     graph.set_data(sym_name, k_data, e_data, g_data, ge_data)
@@ -61,11 +62,11 @@ async def show_plot(sym_name, day_start, day_cnt):
         'VOLUMES',
         'GROUP_RANGES',
         # 'EXTREMUM_RANGES',
-        # 'GROUP_RANKS',
+        'GROUP_RANKS',
         # 'LAST_EXTREMUM',
         # 'LAST_NON_EXTREMUM',
         # 'EX_HEIGHT',
-        'GROUP_EXTREMUMS',
+        # 'GROUP_EXTREMUMS',
         # 'EXTREMUMS',
         # 'DERIVATIVE',
         # 'GROUP_TOLERANCES',

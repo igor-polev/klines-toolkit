@@ -360,8 +360,6 @@ class KTscript:
 
     async def report_archived_groups(self):
 
-        if not _USE_BOTS: return
-
         check_time = await self.poke_interval('archived_check_time', _ARCH_CHECK_INTERVAL)
         if not check_time: return
         last_archived = await self.db.get_open_groups(archived = check_time[0])
@@ -377,8 +375,6 @@ class KTscript:
             print("{}/{} notifications sent / failed".format(sent_cnt, last_archived.shape[0] - sent_cnt))
 
     async def send_open_groups(self, symbol_id):
-
-        if not _USE_BOTS: return
 
         if self.verbosity >= 3:
             print("Checking new active groups...                ", end=' ', flush=True)

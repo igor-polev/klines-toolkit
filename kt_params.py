@@ -14,7 +14,7 @@ _INTERVAL   = 5
 _PARAM_SET  = 'MAIN_SET5'
 _DATA_CHUNK = 120 * 24 * 3600 * 1000 # in ms
 
-_USE_BOTS              = True
+_USE_BOTS              = False
 _SEND_OPEN_GROUPS      = True
 _GET_NEW_DATA          = True
 _PROCESS_DATA          = True

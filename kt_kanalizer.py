@@ -10,7 +10,7 @@ Created on Mon Oct 16 09:54:04 2023
 """
 
 from sys      import maxsize as _MAXINT
-from numpy    import nan     as _NaN
+from numpy    import nan     as _NAN
 from datetime import datetime
 from math     import floor, log10, log, exp
 
@@ -29,6 +29,13 @@ class KAnalizer:
         # params for distance penalty function
         self.dp_a = 24.0
         self.dp_k = log(100.0) / (self.params['EXTR_FRAME_SIZE'] - 24.0)
+        
+        # wieghts for a_factor
+        N = self.params['TOO_OLD_LIMIT']
+        M = N - self.params['EXTR_FRAME_SIZE'] * 2.0
+        k = log(100.0 - 1.0, (N - 1.0) / M)
+        self.a_weights = list(map(lambda x: (x / M) ** k + 1.0, range(N)))
+        self.aw_len = N
 
         self.clear_k_data()
         self.__e_empty = pd.DataFrame(
@@ -37,6 +44,7 @@ class KAnalizer:
                 'range'            : [0],
                 'r_weight'         : [0],
                 'v_factor'         : [0.0],
+                'a_factor'         : [0.0],
                 'tolerance'        : [0.0],
                 'low_tol'          : [0.0],
                 'high_tol'         : [0.0],
@@ -44,10 +52,6 @@ class KAnalizer:
                 'next_high_closed' : [False],
                 'next_low'         : [0],
                 'next_low_closed'  : [False],
-                'last_ex'          : [0],
-                'last_non_ex'      : [0],
-                'height'           : [0.0],
-                'derivative'       : [0.0],
                 'changed'          : [False]
             },
             index = pd.MultiIndex(
@@ -140,10 +144,11 @@ class KAnalizer:
                 p_data = p_data.loc[~p_data.index.duplicated(keep=dup_keep)]
             if p_data.shape[0] < 3:
                 return _MAXINT
-            p_data['derivative'] = _NaN
-            p_data.iloc[1:, 1] = (p_data.iloc[1:, 0].array - p_data.iloc[:-1, 0].array) / (p_data.index[1:] - p_data.index[:-1]) * TIME_STEP
+            p_data['derivative'] = _NAN
+            p_data.iloc[1:, 1] = (p_data.iloc[1:, 0].array - p_data.iloc[:-1, 0].array) \
+                               / (p_data.index[1:] - p_data.index[:-1]) * TIME_STEP
             p_data['ewma'] = p_data.derivative.ewm(alpha=S_FACTOR, adjust=False, ignore_na=True).mean()
-            p_data['sign_change'] = _NaN
+            p_data['sign_change'] = _NAN
             p_data.iloc[2:, 3] = p_data.iloc[2:, 2].array * p_data.iloc[1:-1, 2].array
             limit_set = p_data.loc[p_data.sign_change < 0.0]
             if limit_set.empty:
@@ -153,6 +158,7 @@ class KAnalizer:
         if self.verbosity >= 3:
             print("   Searching for local extremums ...         ", end=' ', flush=True)
             t_start = datetime.now().timestamp()
+            
         min_found = []
         max_found = []
         if self.known_e.empty:
@@ -163,9 +169,10 @@ class KAnalizer:
             sk_data = self.k_data.truncate(before = i - E_FRAME, after = i + E_FRAME)
             if i == sk_data.low.idxmin(): min_found.append(i)
             if i == sk_data.high.idxmax(): max_found.append(i)
+            
         if self.verbosity >= 3:
             print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
-            print("   Evaluating volume, range and roundness ...", end=' ', flush=True)
+            print("   Evaluating parameters ...                 ", end=' ', flush=True)
             t_start = datetime.now().timestamp()
 
         e_data  = self.__e_empty.copy()
@@ -198,14 +205,10 @@ class KAnalizer:
                 e_data['range']            = _MAXINT
                 e_data['r_weight']         = 100
                 e_data['v_factor']         = 0.0
-                e_data['r_factor']         = 0.0
+                e_data['a_factor']         = 0.0
                 e_data['tolerance']        = 0.0
                 e_data['low_tol']          = 0.0
                 e_data['high_tol']         = 0.0
-                e_data['last_ex']          = 0
-                e_data['last_non_ex']      = 0
-                e_data['height']           = 0.0
-                e_data['derivative']       = 0.0
                 e_data['next_high']        = -1
                 e_data['next_high_closed'] = False
                 e_data['next_low']         = -1
@@ -322,52 +325,44 @@ class KAnalizer:
             e_data.set_index('minimum', append=True, inplace=True)
             e_data.sort_index(inplace=True)
 
-        if e_data.index.has_duplicates: raise Exception("Duplicate extremums detected.")
-
-        if self.verbosity >= 3:
-            print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
-            print("   Evaluating area and derivative ...        ", end=' ', flush=True)
-            t_start = datetime.now().timestamp()
-
         min_data = e_data.xs(True,  level='minimum')
         max_data = e_data.xs(False, level='minimum')
+
+        # evaluation of area
         if self.known_e.empty:
             first_new = 0
         else:
             first_new = e_data.index.get_loc(self.known_e.index[-1]) + 1
         for i in e_data.index[first_new:]:
             ex_time  = i[0]
-            ex_min   = i[1]
-            if ex_min:
+            if i[1]:
                 e_sign  = -1.0
+                e_field = 'low'
                 m_data  = min_data
-                nm_data = max_data
             else:
                 e_sign  = 1.0
+                e_field = 'high'
                 m_data  = max_data
-                nm_data = min_data
-            e_price  = m_data.at[ex_time, 'price']
-            se_price = e_sign * e_price
-            sk_data  = m_data.loc[(e_sign * m_data.price > se_price) & (m_data.index < ex_time)]
+            e_price   = m_data.at[ex_time, 'price']
+            se_price  = e_sign * e_price
+            last_time = ex_time - TIME_STEP
+            sk_data   = m_data.loc[(e_sign * m_data.price > se_price) & (m_data.index < ex_time)]
             if sk_data.empty:
-                last_ex = 0
+                sk_data = self.k_data.loc[:last_time]
             else:
-                last_ex = sk_data.index[-1]
-                e_data.at[i, 'last_ex'] = last_ex
-            sk_data = nm_data.truncate(before = last_ex, after = ex_time - TIME_STEP)
-            if not sk_data.empty:
-                if ex_min:
-                    last_ex = sk_data.price.idxmax()
-                    # dup_keep = 'first'
-                    e_field = 'low'
-                else:
-                    last_ex  = sk_data.price.idxmin()
-                    # dup_keep = 'last'
-                    e_field = 'high'
-                e_data.at[i, 'last_non_ex'] = last_ex
-                e_data.at[i, 'height']      = abs(e_price - sk_data.at[last_ex, 'price'])
-                e_data.at[i, 'derivative']  = abs((e_price - self.k_data.at[ex_time - E_FRAME, e_field]) / e_price)
-
+                sk_data = self.k_data.loc[sk_data.index[-1] + TIME_STEP : last_time]
+            idx = sk_data.loc[e_sign * sk_data[e_field] > se_price]
+            if not idx.empty:
+                sk_data = sk_data.loc[idx.index[-1] + TIME_STEP :]
+            k_len = sk_data.shape[0]
+            if self.aw_len > k_len:
+                w = self.a_weights[self.aw_len - k_len :]
+            elif self.aw_len < k_len:
+                w = [1.0] * (k_len - self.aw_len) + self.a_weights
+            else:
+                w = self.a_weights
+            e_data.at[i, 'a_factor'] = (w * (e_price - sk_data[e_field]) / se_price).sum()
+            
         if self.verbosity >= 3:
             print("done in {:.2f} seconds.".format(datetime.now().timestamp() - t_start))
             print("   Searching for subsequent prices ...       ", end=' ', flush=True)
@@ -806,15 +801,15 @@ class KAnalizer:
             p.iloc[1:, 1] = p.iloc[:-1, 0].array - p.iloc[1:, 0].array
             return p.price_diff.map(lambda p: 2.0 ** (p * p_scale)).product()
 
-        # to avoid negative values of log it is glued to power function by value and derivative at x = 5    
+        def distance_penalty(x):
+            return 1.0 / (1.0 + exp(self.dp_k * (x - self.dp_a)))
+
         def log_scale(x):
+            # to avoid negative values of log it is glued to power function by value and derivative at x = 5    
             if x >= 5.0:
                 return log10(x)
             else:
                 return 0.2571170303326 * x ** 0.621379355908633
-            
-        def distance_penalty(x):
-            return 1.0 / (1.0 + exp(self.dp_k * (x - self.dp_a)))
 
         if self.verbosity >= 3:
             print("   Groups classification ...                 ", end=' ', flush=True)
@@ -831,7 +826,10 @@ class KAnalizer:
                 (self.g_data.status_id != statuses['OUTDATED']) &
                 ((self.g_data.status_id != statuses['CLOSED']) | self.g_data.changed)
             ]
-        g_data = g_data.join(self.e_data[['v_factor', 'tolerance']], on=['open_time', 'minimum'])
+        g_data = g_data.join(
+            self.e_data[['v_factor', 'a_factor', 'tolerance']],
+            on = ['open_time', 'minimum']
+        )
         g_data['rank_old']      = g_data['rank']
         g_data['result_old']    = g_data['result']
         g_data['result_id_old'] = g_data['result_id']
@@ -848,10 +846,14 @@ class KAnalizer:
         g_data.loc[e_counts == 2, 'class_id'] = classes['SECOND_TOUCH']
         cl_data = g_data.loc[(e_counts == 1) | (e_counts == 2)].copy()
         if not cl_data.empty:
-            # rank is proportional to volume factor (scaled) and price roundness factor
+            # rank is proportional to scaled volume factor
+            # rank is proportional to scaled area factor
+            # rank is proportional to roundness factor
             # rank is inversaly proportional to relative tolerance
-            cl_data['rank'] = 3.0 * cl_data.v_factor.map(log_scale) * cl_data.r_factor \
-                              / (cl_data.high_tol - cl_data.low_tol) * cl_data.tolerance
+            cl_data['rank'] = 3.0 * cl_data.v_factor.map(log_scale) \
+                                  * cl_data.a_factor.map(log_scale) \
+                                  * cl_data.r_factor \
+                                  / (cl_data.high_tol - cl_data.low_tol) * cl_data.tolerance
             cl_data = cl_data.join(self.e_data.range, on=['open_time','minimum'], rsuffix='_e')
 
             # Minimums with positive result
@@ -943,6 +945,7 @@ class KAnalizer:
                 ].join(em_data[['v_factor','price']], on=['e_time','minimum'])
 
                 # rank is proportional to price roundness factor
+                # rank is proportional to scaled area factor of first extremum but not decreasing total
                 # rank is proportional weighted sum of extremums v_factors (scaled)
                 # with weights proportional to distance between extremums (scaled)
                 # rank is inversaly proportional to exponential function of relative price variation (see above)
@@ -955,10 +958,15 @@ class KAnalizer:
                 gr_list['v_factor']  = gr_list.v_factor.map(log_scale)
                 # first extremum goes with 1.0 weight
                 gr_list['vd_factor'] = gr_list.v_factor.iat[0]
-                # other extremums are weighted according to their v_factor value: smallest v_factor goes with smallest weight etc.
-                gr_list.iloc[1:, gr_list.shape[1]-1] = gr_list.v_factor.iloc[1:].sort_values().array * gr_list.d_factor.iloc[1:].sort_values().array
+                # other extremums are weighted according to their v_factor value:
+                # smallest v_factor goes with smallest weight etc.
+                gr_list.iloc[1:, gr_list.shape[1]-1] = gr_list.v_factor.iloc[1:].sort_values().array \
+                                                     * gr_list.d_factor.iloc[1:].sort_values().array
+                cl_data.at[gr.Index, 'rank'] = gr.r_factor \
+                                             * max(1.0, log_scale(gr.a_factor)) \
+                                             * gr_list.vd_factor.sum() \
+                                             * eval_price_variance(gr_list.price)
 
-                cl_data.at[gr.Index, 'rank'] = gr.r_factor * gr_list.vd_factor.sum() * eval_price_variance(gr_list.price)
                 # secondary groups are non-resultative and closed by definition
                 cl_data.at[gr.Index, 'status_id'] = statuses['CLOSED']
                 if not gr.primary: continue
